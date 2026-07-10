@@ -1,0 +1,37 @@
+# Ingestão real dos Dados Abertos da CVM.
+#
+# Requer o secret DATABASE_URL apontando para o Postgres (Neon/Supabase), ex.:
+#   postgresql+psycopg://user:senha@host/db?sslmode=require
+#
+# Disparo manual (workflow_dispatch) para o backfill; o agendamento semanal
+# entra na Fase 5 (descomentar o bloco schedule).
+name: Ingestão CVM
+
+on:
+  workflow_dispatch:
+    inputs:
+      datasets:
+        description: "datasets (cadastro fii fidc)"
+        default: "cadastro fii"
+      anos:
+        description: "anos dos informes"
+        default: "2025 2026"
+  # schedule:
+  #   - cron: "0 10 * * 1"  # segundas 07:00 BRT (CSVs da CVM atualizam semanalmente)
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .[postgres]
+      - name: Sync CVM
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python -m ingestor sync-cvm \
+            --datasets ${{ github.event.inputs.datasets || 'cadastro fii' }} \
+            --anos ${{ github.event.inputs.anos || '2025 2026' }}

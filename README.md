@@ -4,9 +4,10 @@ Coleta e estruturação de dados de fundos (FII, FIDC, FIAGRO, FIP, FIF...) a pa
 Portal de Dados Abertos da CVM e do FundosNET, para filtros por características do
 fundo e por conteúdo de documentos. Arquitetura completa em [`ARQUITETURA.md`](ARQUITETURA.md).
 
-**Status: Fase 1** — ingestão dos Dados Abertos da CVM (cadastro + informes mensais)
-com schema de banco e métricas derivadas. Fases seguintes: documentos do FNET,
-full-text search de regulamentos, API e UI no Vercel.
+**Status: Fase 2** — Fase 1 (Dados Abertos da CVM: cadastro + informes mensais +
+métricas) e Fase 2 (documentos do FNET: metadados incrementais, download para
+storage, tabelas de domínio). Fases seguintes: full-text search de regulamentos,
+API e UI no Vercel.
 
 ## Ingestor (Python 3.11+)
 
@@ -26,6 +27,28 @@ python -m ingestor sync-cvm --datasets cadastro fii fidc --anos 2024 2025 2026
 Comandos: `init-db` (cria tabelas), `sync-cvm` (carrega e recalcula métricas),
 `metricas` (só recalcula derivados).
 
+### Documentos do FNET (Fase 2)
+
+```bash
+# 1. IDs dos filtros do FNET (tipos de fundo, categorias) -> tabela dominios
+python -m ingestor dominios-fnet
+
+# 2. metadados de documentos (incremental por cursor de dataEntrega)
+python -m ingestor sync-fnet --tipo-fundo 1 --categoria 9   # ids da tabela dominios
+python -m ingestor sync-fnet --desde 2026-01-01             # sem filtros: tudo desde a data
+
+# 3. download dos arquivos pendentes para o storage (regulamentos primeiro)
+python -m ingestor download-docs --categorias Regulamento --limite 200
+```
+
+Configuração por env: `FNET_MIN_INTERVAL` (rate limit, default 1 req/s) e
+`STORAGE_URL` — diretório local (default `./storage`) ou `s3://bucket/prefixo`
+(S3/R2/Supabase Storage; `pip install -e .[s3]` e `S3_ENDPOINT_URL` para não-AWS).
+
+O corpo do `downloadDocumento` do FNET costuma vir em base64: o cliente detecta
+e decodifica pelos magic bytes, e registra o formato (`pdf`, `xml`, `zip`...).
+Re-sincronizar metadados nunca desfaz o estado de download de um documento.
+
 ### Datasets
 
 | Dataset | Fonte | Alimenta |
@@ -43,6 +66,9 @@ disparam `LayoutError` com diagnóstico das colunas encontradas.
 - `fundos` — dimensão por CNPJ (tipo de veículo, público-alvo, situação, admin/gestor, segmento)
 - `informes_mensais` — série mensal por fundo (PL, nº de cotistas, valor de cota), única por (cnpj, competência)
 - `fundos_metricas` — derivados para os filtros: PL médio 12m, PL e cotistas atuais
+- `documentos` — metadados dos documentos do FNET (categoria, competência, situação,
+  status de download, URL no storage, JSON original para diagnóstico)
+- `dominios` — opções dos filtros do FNET (tipos de fundo, categorias de documento)
 - `sync_state` — cursores de sincronização
 
 ## Execução no GitHub Actions

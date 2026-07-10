@@ -7,10 +7,12 @@ import sys
 
 from sqlalchemy.orm import Session
 
-from . import cvm_bulk
+from . import cvm_bulk, fnet_sync
 from .db import get_engine, init_db
+from .fnet_client import FnetClient
 from .http_client import fetch_bytes
 from .metricas import recompute_metricas
+from .storage import storage_from_env
 
 log = logging.getLogger("ingestor")
 
@@ -54,6 +56,18 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("metricas", help="recalcula fundos_metricas")
 
+    p_fnet = sub.add_parser("sync-fnet", help="sincroniza metadados de documentos do FNET")
+    p_fnet.add_argument("--tipo-fundo", type=int, help="id do tipo de fundo no FNET (ver dominios-fnet)")
+    p_fnet.add_argument("--categoria", type=int, help="idCategoriaDocumento no FNET")
+    p_fnet.add_argument("--desde", help="data inicial AAAA-MM-DD (default: cursor do último sync)")
+    p_fnet.add_argument("--max-paginas", type=int, default=200)
+
+    p_down = sub.add_parser("download-docs", help="baixa documentos pendentes para o storage")
+    p_down.add_argument("--categorias", nargs="+", help='ex.: --categorias Regulamento "Fato Relevante"')
+    p_down.add_argument("--limite", type=int, default=100)
+
+    sub.add_parser("dominios-fnet", help="raspa as tabelas de domínio dos filtros do FNET")
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -83,6 +97,42 @@ def main(argv: list[str] | None = None) -> int:
             total = recompute_metricas(session)
             session.commit()
             log.info("métricas recalculadas para %s fundos", total)
+        elif args.comando == "sync-fnet":
+            init_db(engine)
+            client = FnetClient()
+            try:
+                fnet_sync.sync_documentos(
+                    session,
+                    client,
+                    tipo_fundo=args.tipo_fundo,
+                    id_categoria=args.categoria,
+                    desde=dt.date.fromisoformat(args.desde) if args.desde else None,
+                    max_pages=args.max_paginas,
+                )
+                session.commit()
+            finally:
+                client.close()
+        elif args.comando == "download-docs":
+            client = FnetClient()
+            try:
+                fnet_sync.download_documentos(
+                    session,
+                    client,
+                    storage_from_env(),
+                    categorias=args.categorias,
+                    limite=args.limite,
+                )
+                session.commit()
+            finally:
+                client.close()
+        elif args.comando == "dominios-fnet":
+            init_db(engine)
+            client = FnetClient()
+            try:
+                fnet_sync.sync_dominios(session, client)
+                session.commit()
+            finally:
+                client.close()
     return 0
 
 

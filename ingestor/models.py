@@ -1,6 +1,7 @@
-"""Modelo de dados da Fase 1: fundos, informes mensais, métricas e estado de sync.
+"""Modelo de dados: fundos, informes mensais, métricas, documentos FNET e sync.
 
-As tabelas de documentos (FNET) entram na Fase 2.
+Fase 1: fundos / informes_mensais / fundos_metricas / sync_state.
+Fase 2: documentos / documento (metadados e arquivos do FNET) e dominios.
 """
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import datetime as dt
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     Date,
     DateTime,
     ForeignKey,
@@ -74,6 +76,45 @@ class FundoMetricas(Base):
     atualizado_em: Mapped[dt.datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class Documento(Base):
+    """Metadados de documentos do FNET; o arquivo em si vai para o object storage."""
+
+    __tablename__ = "documentos"
+
+    # id do documento no FNET (downloadDocumento?id=...)
+    id_fnet: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    cnpj: Mapped[str | None] = mapped_column(ForeignKey("fundos.cnpj"), index=True)
+    denominacao_fundo: Mapped[str | None] = mapped_column(Text)
+    categoria: Mapped[str | None] = mapped_column(String(120), index=True)
+    tipo: Mapped[str | None] = mapped_column(String(120))
+    especie: Mapped[str | None] = mapped_column(String(120))
+    # dataReferencia do FNET varia de formato ("05/2026", "10/07/2026"); guardamos
+    # a string original e a competência normalizada quando parseável
+    data_referencia: Mapped[str | None] = mapped_column(String(20))
+    competencia: Mapped[dt.date | None] = mapped_column(Date, index=True)
+    data_entrega: Mapped[dt.datetime | None] = mapped_column(DateTime, index=True)
+    situacao: Mapped[str | None] = mapped_column(String(20))
+    versao: Mapped[int | None] = mapped_column(Integer)
+    modalidade: Mapped[str | None] = mapped_column(String(20))
+    # pendente | baixado | erro
+    status_download: Mapped[str] = mapped_column(String(20), default="pendente", index=True)
+    url_storage: Mapped[str | None] = mapped_column(Text)
+    formato: Mapped[str | None] = mapped_column(String(10))
+    baixado_em: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    # resposta original do FNET, para diagnóstico de mudanças de layout
+    raw_json: Mapped[str | None] = mapped_column(Text)
+
+
+class Dominio(Base):
+    """Tabelas de domínio raspadas dos filtros do FNET (tipos de fundo, categorias...)."""
+
+    __tablename__ = "dominios"
+
+    grupo: Mapped[str] = mapped_column(String(60), primary_key=True)
+    id_fnet: Mapped[str] = mapped_column(String(20), primary_key=True)
+    rotulo: Mapped[str] = mapped_column(Text)
 
 
 class SyncState(Base):

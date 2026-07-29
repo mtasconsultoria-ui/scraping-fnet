@@ -125,6 +125,10 @@ def test_prefiltro_e_mais_permissivo_que_o_regex():
     # conectores nunca viram prefiltro
     assert token_prefiltro("de do da") in {"de", "do", "da"}
     assert token_prefiltro("Cédula do Produto") == "produto"
+    # casos travados também em web/tests/textos.test.ts: as duas implementações
+    # precisam escolher o mesmo prefiltro, inclusive no empate de comprimento
+    assert token_prefiltro("Cédula do Produto Rural Financeira") == "financeira"
+    assert token_prefiltro("cédulas do produto") == "cedula"
 
 
 # --- vedação ----------------------------------------------------------------

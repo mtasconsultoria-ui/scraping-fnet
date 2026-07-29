@@ -1,19 +1,32 @@
 import io
 import zipfile
 
+import os
+
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from ingestor.db import init_db
+from ingestor.db import get_engine, init_db
 
 
 @pytest.fixture()
 def session(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path}/test.db")
+    """Sessão de teste.
+
+    Por padrão usa SQLite (com foreign keys ativadas, como no PostgreSQL). Com
+    TEST_DATABASE_URL definido, roda a mesma suíte contra PostgreSQL — é assim
+    que o caminho de produção (ON CONFLICT, ordem de INSERT, FKs) é exercido.
+    """
+    url = os.environ.get("TEST_DATABASE_URL")
+    engine = get_engine(url or f"sqlite:///{tmp_path}/test.db")
+    if url:
+        from ingestor.models import Base
+
+        Base.metadata.drop_all(engine)
     init_db(engine)
     with Session(engine) as sess:
         yield sess
+        sess.rollback()
 
 
 def make_zip(files: dict[str, bytes]) -> bytes:

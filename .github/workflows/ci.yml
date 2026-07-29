@@ -5,12 +5,62 @@ on:
   pull_request:
 
 jobs:
-  test:
+  ingestor:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fnet_test
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e .[dev]
-      - run: pytest -v
+      - run: pip install -e .[dev,postgres]
+      # SQLite cobre o desenvolvimento local; PostgreSQL é o banco de produção,
+      # onde as foreign keys e o ON CONFLICT se comportam de fato
+      - name: Testes (SQLite)
+        run: pytest -q
+      - name: Testes (PostgreSQL)
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/fnet_test
+        run: pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fnet_test
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Testes (unitários + integração com PostgreSQL)
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fnet_test
+          PGSSL: disable
+        run: npm test
+      - run: npm run build

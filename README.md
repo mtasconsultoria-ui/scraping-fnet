@@ -4,11 +4,12 @@ Coleta e estruturação de dados de fundos (FII, FIDC, FIAGRO, FIP, FIF...) a pa
 Portal de Dados Abertos da CVM e do FundosNET, para filtros por características do
 fundo e por conteúdo de documentos. Arquitetura completa em [`ARQUITETURA.md`](ARQUITETURA.md).
 
-**Status: Fase 3** — Fase 1 (Dados Abertos da CVM: cadastro + informes mensais +
+**Status: Fase 4** — Fase 1 (Dados Abertos da CVM: cadastro + informes mensais +
 métricas), Fase 2 (documentos do FNET: metadados incrementais, download para
-storage, tabelas de domínio) e Fase 3 (extração de texto dos regulamentos +
-busca combinando filtros estruturados e conteúdo). Fases seguintes: API e UI no
-Vercel; agendamento e monitoramento.
+storage, tabelas de domínio), Fase 3 (extração de texto dos regulamentos + busca
+combinando filtros estruturados e conteúdo) e Fase 4 (API de consulta e interface
+Next.js para deploy na Vercel — ver [`web/`](web/README.md)). Fase seguinte:
+agendamento, monitoramento e export CSV.
 
 ## Ingestor (Python 3.11+)
 
@@ -110,6 +111,31 @@ disparam `LayoutError` com diagnóstico das colunas encontradas.
   offsets alinhados e permite recortar o trecho do texto original)
 - `dominios` — opções dos filtros do FNET (tipos de fundo, categorias de documento)
 - `sync_state` — cursores de sincronização
+
+## Interface e API (Fase 4)
+
+```bash
+cd web && npm install
+export DATABASE_URL="postgresql://usuario:senha@host:5432/fnet"
+npm run dev    # http://localhost:3000
+```
+
+Tela de filtros (tipo de veículo, público-alvo, PL médio, cotistas, termo no
+documento) com os fundos encontrados, seus trechos de regulamento destacados e o
+aviso de possível vedação. As mesmas consultas estão disponíveis em JSON para uso
+programático. Detalhes de endpoints, testes e deploy: [`web/README.md`](web/README.md).
+
+## Banco de dados: SQLite e PostgreSQL
+
+O ingestor roda nos dois; **produção é PostgreSQL** e é ele que valida foreign
+keys e resolve `ON CONFLICT`. O SQLite ignora foreign keys por padrão, então
+`get_engine` liga `PRAGMA foreign_keys=ON` para que o desenvolvimento local
+recuse os mesmos erros que a produção recusaria. A suíte roda contra os dois:
+
+```bash
+pytest                                                    # SQLite
+TEST_DATABASE_URL=postgresql+psycopg://... pytest          # PostgreSQL
+```
 
 ## Execução no GitHub Actions
 

@@ -256,7 +256,7 @@ um repo por app Vercel. Manter junto simplifica versionamento do schema.
 | 1 | `cvm_bulk` + schema Postgres + carga de fundos/informes (filtros quantitativos já funcionam) | ✅ concluída |
 | 2 | `fnet_client` + `fnet_sync` de metadados de documentos + download de regulamentos vigentes | ✅ concluída |
 | 3 | Extração de texto + busca por conteúdo (caso CPR-F de ponta a ponta) | ✅ concluída |
-| 4 | API de consulta + UI Next.js no Vercel | pendente |
+| 4 | API de consulta + UI Next.js no Vercel | ✅ concluída |
 | 5 | Agendamento, monitoramento (alertas de falha de sync) e export CSV na UI | pendente |
 
 ### Ajuste de rumo na Fase 3
@@ -277,3 +277,28 @@ mesmo ativo em plural e com conectores trocados (daí o matching flexível), e
 mencionar um ativo não é permiti-lo — "é vedada a aquisição de CPR-F" casaria a
 busca ingenuamente, então trechos precedidos de vedação são sinalizados e podem
 ser filtrados.
+
+### Ajuste de rumo na Fase 4
+
+A lógica de busca ficou **duplicada em Python e TypeScript** (`ingestor/textos.py`
+e `web/lib/textos.ts`). É uma duplicação deliberada: manter a UI na Vercel — o
+padrão dos demais projetos — significa TypeScript no servidor da aplicação, e a
+alternativa (um serviço Python separado só para a busca) acrescentaria um
+componente para operar e pagar. As duas implementações são cobertas pelos mesmos
+casos de teste, inclusive nos detalhes que poderiam divergir silenciosamente
+(desempate do prefiltro, tratamento de plural). Se a lógica textual crescer muito,
+vale reavaliar em favor de um serviço único.
+
+No PostgreSQL a confirmação também roda no banco (operador `~`), para que só os
+documentos relevantes trafeguem até a função serverless. Como o regex POSIX não
+tem lookarounds, a versão SQL usa `\y` e é deliberadamente **mais permissiva** que
+a de JS: o banco peneira grosso, o JS confirma. Consequência visível: o `COUNT` do
+SQL é anterior ao descarte de vedações, então a API expõe `totalAproximado`
+(limite superior) e `exibidos` (o que de fato passou), em vez de um "total" que
+não corresponderia à lista.
+
+A Fase 4 também revelou um defeito das fases anteriores: sem `relationship()`
+declarado, o SQLAlchemy desconhecia a dependência entre entidades e emitia
+`INSERT` em `documentos` antes de `fundos`. O SQLite aceitava (ignora foreign keys
+por padrão), o PostgreSQL de produção rejeitaria. Corrigido com os relacionamentos,
+com `PRAGMA foreign_keys=ON` no SQLite e rodando a suíte também contra PostgreSQL.

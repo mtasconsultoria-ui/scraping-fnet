@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Iterable, Sequence
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -27,7 +27,18 @@ _PG_TRGM_DDL = (
 
 
 def get_engine(url: str | None = None) -> Engine:
-    return create_engine(url or os.environ.get("DATABASE_URL", DEFAULT_URL))
+    engine = create_engine(url or os.environ.get("DATABASE_URL", DEFAULT_URL))
+    if engine.dialect.name == "sqlite":
+        # O SQLite ignora foreign keys por padrão; sem isto, o desenvolvimento
+        # local aceita ordens de INSERT que o PostgreSQL de produção rejeita.
+        event.listen(engine, "connect", _sqlite_enable_fk)
+    return engine
+
+
+def _sqlite_enable_fk(dbapi_connection, connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 
 def init_db(engine: Engine) -> None:

@@ -20,7 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -46,6 +46,13 @@ class Fundo(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
+    # Os relationships não são usados para navegar (as consultas são explícitas),
+    # mas sem eles o ORM desconhece a dependência entre as entidades e emite os
+    # INSERTs fora de ordem — o que o PostgreSQL rejeita por violação de FK.
+    informes: Mapped[list["InformeMensal"]] = relationship(back_populates="fundo")
+    metricas: Mapped["FundoMetricas | None"] = relationship(back_populates="fundo")
+    documentos: Mapped[list["Documento"]] = relationship(back_populates="fundo")
+
 
 class InformeMensal(Base):
     __tablename__ = "informes_mensais"
@@ -62,6 +69,8 @@ class InformeMensal(Base):
     # ex.: fii_inf_mensal, fidc_inf_mensal
     fonte: Mapped[str] = mapped_column(String(30))
 
+    fundo: Mapped["Fundo"] = relationship(back_populates="informes")
+
 
 class FundoMetricas(Base):
     """Derivados recalculados após cada sync (consulta rápida na API)."""
@@ -76,6 +85,8 @@ class FundoMetricas(Base):
     atualizado_em: Mapped[dt.datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+    fundo: Mapped["Fundo"] = relationship(back_populates="metricas")
 
 
 class Documento(Base):
@@ -106,6 +117,9 @@ class Documento(Base):
     # resposta original do FNET, para diagnóstico de mudanças de layout
     raw_json: Mapped[str | None] = mapped_column(Text)
 
+    fundo: Mapped["Fundo | None"] = relationship(back_populates="documentos")
+    texto_extraido: Mapped["DocumentoTexto | None"] = relationship(back_populates="documento")
+
 
 class DocumentoTexto(Base):
     """Texto extraído de um documento, para busca por conteúdo.
@@ -126,6 +140,8 @@ class DocumentoTexto(Base):
     # pdf | xml | texto | ocr | vazio (vazio = PDF sem camada de texto, fila de OCR)
     origem: Mapped[str] = mapped_column(String(20), index=True)
     extraido_em: Mapped[dt.datetime | None] = mapped_column(DateTime)
+
+    documento: Mapped["Documento"] = relationship(back_populates="texto_extraido")
 
 
 class Dominio(Base):

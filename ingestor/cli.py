@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     p_fnet.add_argument("--tipo-fundo", type=int, help="id do tipo de fundo no FNET (ver dominios-fnet)")
     p_fnet.add_argument("--categoria", type=int, help="idCategoriaDocumento no FNET")
     p_fnet.add_argument("--desde", help="data inicial AAAA-MM-DD (default: cursor do último sync)")
-    p_fnet.add_argument("--max-paginas", type=int, default=200)
+    p_fnet.add_argument("--max-paginas", type=int, default=2000)
 
     p_down = sub.add_parser("download-docs", help="baixa documentos pendentes para o storage")
     p_down.add_argument("--categorias", nargs="+", help='ex.: --categorias Regulamento "Fato Relevante"')

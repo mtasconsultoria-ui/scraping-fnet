@@ -25,6 +25,19 @@ def test_norm_cnpj():
     assert norm_cnpj(None) is None
 
 
+def test_cnpj_valido():
+    from ingestor.parsing import cnpj_valido
+
+    assert cnpj_valido("11222333000181")  # exemplo canônico válido
+    assert cnpj_valido("11444777000161")
+    assert cnpj_valido("11111111000191")  # CNPJ clássico de teste, DV correto
+    assert not cnpj_valido("33333333000153")  # DV errado
+    assert not cnpj_valido("20260729000123")  # protocolo com cara de CNPJ
+    assert not cnpj_valido("11111111111111")  # sequência repetida
+    assert not cnpj_valido("123")
+    assert not cnpj_valido("1122233300018a")
+
+
 def test_parse_decimal_formats():
     assert parse_decimal("1234.56") == Decimal("1234.56")
     assert parse_decimal("1.234,56") == Decimal("1234.56")

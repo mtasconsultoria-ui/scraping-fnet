@@ -147,9 +147,15 @@ class FnetClient:
     ) -> dict:
         """Uma página da busca. Datas no formato dd/MM/yyyy (o que a UI envia).
 
-        Atenção ao `tipoFundo`: diferente dos outros filtros, o valor de "todos"
-        é a **string vazia**, não 0 (confirmado nos <option> da página). Enviar 0
-        filtra por um tipo inexistente e a busca devolve zero resultados.
+        Semântica do `tipoFundo`, medida em produção (2026-07-29):
+        - `0` filtra por um tipo inexistente: a busca devolve SEMPRE zero;
+        - vazio NÃO é "todos": devolve apenas os documentos mais recentes
+          (~centenas, os "do dia"), enquanto um tipo específico devolve o
+          acervo inteiro (FIDC=2 sozinho: ~395 mil documentos).
+
+        Para varrer o acervo, itere por tipo (ver `listar_tipos_fundo`) — é o
+        que `fnet_sync.sync_documentos` e a prospecção fazem quando nenhum
+        tipo é informado.
         """
         params: dict = {
             "d": 1,
@@ -216,6 +222,22 @@ class FnetClient:
         if not content:
             raise FnetShapeError(f"downloadDocumento?id={doc_id} retornou corpo vazio")
         return content
+
+    def listar_tipos_fundo(self) -> list[tuple[int, str]]:
+        """Ids reais dos tipos de fundo, lidos da própria página de filtros.
+
+        Necessário porque a busca com tipoFundo vazio não percorre o acervo —
+        só devolve os documentos mais recentes; a varredura completa é por tipo.
+        """
+        grupos = self.fetch_domains()
+        tipos: list[tuple[int, str]] = []
+        for valor, rotulo in grupos.get("tipoFundo", []):
+            valor = valor.strip()
+            if valor.isdigit() and int(valor) != 0:  # descarta o placeholder de "todos"
+                tipos.append((int(valor), rotulo.strip()))
+        if not tipos:
+            raise FnetShapeError("nenhum tipo de fundo com id numérico nos filtros do FNET")
+        return tipos
 
     def fetch_domains(self) -> dict[str, list[tuple[str, str]]]:
         """Raspa os <select> da página de filtros: grupo -> [(valor, rótulo)]."""

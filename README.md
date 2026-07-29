@@ -157,6 +157,12 @@ situação cadastral — parando assim que junta o número de fundos pedido. É 
 amostra dos documentos mais recentes, não o universo completo: para isso existe a
 ingestão, que cobre tudo e guarda o resultado.
 
+Constatação da validação real que moldou os dois comandos: a busca do FNET com
+`tipoFundo` vazio **não percorre o acervo** — devolve só os documentos do dia.
+Por isso `sync-fnet` e `prospectar` varrem tipo a tipo (ids raspados da própria
+página de filtros) quando nenhum tipo é informado, e quando os metadados vêm sem
+CNPJ (comum), a prospecção o extrai do texto do próprio documento.
+
 Ambos rodam também pelo workflow **Teste de fumaça** (`workflow_dispatch`), útil
 quando a máquina local não alcança os portais.
 

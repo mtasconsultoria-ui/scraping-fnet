@@ -156,6 +156,41 @@ def test_diagnostico_avisa_fila_de_ocr(session):
     assert diag.status == AVISO
 
 
+def test_diagnostico_avisa_documentos_defasados(session):
+    """Sync 'ok' com acervo recente ausente (backfill no passado) gera aviso."""
+    _fundo_com_informe(session)
+    with registrar_execucao(session, "fnet_documentos"):
+        pass  # a execução em si foi bem-sucedida...
+    session.add(
+        Documento(id_fnet=9, cnpj="11111111000191", categoria="Regulamento",
+                  status_download="pendente",
+                  data_entrega=AGORA - dt.timedelta(days=400))
+    )
+    session.commit()
+
+    diag = diagnosticar(session, agora=AGORA)
+    docs = next(v for v in diag.verificacoes if v.nome == "documentos")
+    assert docs.status == AVISO
+    assert "400 dias" in docs.mensagem
+    assert diag.status == AVISO  # visível, sem derrubar o agendamento
+
+
+def test_diagnostico_documentos_recentes_ok(session):
+    _fundo_com_informe(session)
+    with registrar_execucao(session, "fnet_documentos"):
+        pass
+    session.add(
+        Documento(id_fnet=9, cnpj="11111111000191", categoria="Regulamento",
+                  status_download="pendente",
+                  data_entrega=AGORA - dt.timedelta(days=1))
+    )
+    session.commit()
+
+    diag = diagnosticar(session, agora=AGORA)
+    docs = next(v for v in diag.verificacoes if v.nome == "documentos")
+    assert docs.status == OK
+
+
 def test_diagnostico_serializa_para_json(session):
     _fundo_com_informe(session)
     with registrar_execucao(session, "cvm") as stats:

@@ -37,49 +37,94 @@ def _resultado(ok: bool, mensagem: str) -> bool:
     return ok
 
 
+# Colunas de que os loaders dependem; ausência no CABEÇALHO é quebra de layout.
+# Taxa de preenchimento é outra história: o começo do cad_fi é dominado por
+# fundos dos anos 90, cancelados, com público-alvo/admin legitimamente vazios
+# (constatado na 1ª execução real) — por isso a análise compara início e fim.
+_COLUNAS_CADASTRO = (
+    "CNPJ_FUNDO", "DENOM_SOCIAL", "SIT", "TP_FUNDO",
+    "PUBLICO_ALVO", "ADMIN", "GESTOR", "DT_REG", "CLASSE",
+)
+_CAMPOS_TAXA = ("denominacao", "tipo_veiculo", "situacao", "publico_alvo", "administrador")
+
+
+def _taxas(fundos: list[dict]) -> dict[str, int]:
+    return {campo: sum(1 for f in fundos if f.get(campo)) for campo in _CAMPOS_TAXA}
+
+
 def testar_cvm_cadastro() -> bool:
-    """Baixa só o começo do cad_fi.csv (Range) e confere o cabeçalho."""
+    """Valida o cad_fi.csv com o parser de produção, em amostras do início e do fim."""
     _titulo("1/4  CVM — cadastro de fundos (cad_fi.csv)")
     url = url_cadastro()
-    print(f"GET {url}\n  (apenas os primeiros 400 KB, via header Range)")
+    print(f"GET {url}\n  (amostras de 400 KB do início e do fim, via header Range)")
     try:
-        resposta = httpx.get(
+        cabeca = httpx.get(
             url,
             headers={**BROWSER_HEADERS, "Range": "bytes=0-400000"},
             timeout=120,
             follow_redirects=True,
         )
-        resposta.raise_for_status()
+        cabeca.raise_for_status()
     except httpx.HTTPError as exc:
         return _resultado(False, f"download falhou: {exc}")
 
-    print(f"  HTTP {resposta.status_code} · {len(resposta.content):,} bytes recebidos")
+    print(f"  HTTP {cabeca.status_code} · {len(cabeca.content):,} bytes (início)")
+    linha_cabecalho, _, resto = cabeca.content.partition(b"\n")
     # a última linha do recorte quase sempre vem cortada ao meio
-    conteudo = resposta.content.rsplit(b"\n", 1)[0]
-    tabela = CsvTable(conteudo, "cad_fi.csv")
+    tabela = CsvTable(linha_cabecalho + b"\n" + resto.rsplit(b"\n", 1)[0], "cad_fi.csv")
     print(f"\n  colunas encontradas ({len(tabela.columns)}):")
     print(f"    {sorted(tabela.columns)}")
 
-    # o teste real é o parser de produção rodando sobre o arquivo de verdade
+    faltando = [c for c in _COLUNAS_CADASTRO if tabela.index_of(c) is None]
+    if faltando:
+        return _resultado(False, f"colunas ausentes no cabeçalho: {faltando}")
+
     try:
-        fundos = cvm_bulk.parse_cadastro(tabela)
+        inicio = cvm_bulk.parse_cadastro(tabela)
     except LayoutError as exc:
         return _resultado(False, f"parse_cadastro falhou: {exc}")
+    print(f"\n  parse_cadastro no início do arquivo: {len(inicio)} fundos")
+    print(f"    preenchimento: {_taxas(inicio)}")
+    print("    (início = fundos antigos/cancelados; campos vazios aqui não indicam defeito)")
 
-    print(f"\n  parse_cadastro extraiu {len(fundos)} fundos do recorte")
-    if fundos:
-        print("  exemplo:")
-        for chave, valor in list(fundos[0].items()):
+    # amostra do FIM: fundos recentes têm os campos preenchidos — se um campo
+    # vier vazio também aqui, o conteúdo mudou de coluna
+    fim: list[dict] = []
+    if cabeca.status_code == 206:
+        try:
+            cauda = httpx.get(
+                url,
+                headers={**BROWSER_HEADERS, "Range": "bytes=-400000"},
+                timeout=120,
+                follow_redirects=True,
+            )
+            if cauda.status_code == 206:
+                corpo = cauda.content.split(b"\n", 1)[-1]  # descarta a linha cortada
+                fim = cvm_bulk.parse_cadastro(
+                    CsvTable(linha_cabecalho + b"\n" + corpo, "cad_fi.csv (fim)")
+                )
+                print(f"\n  parse_cadastro no fim do arquivo: {len(fim)} fundos")
+                print(f"    preenchimento: {_taxas(fim)}")
+            else:
+                print(f"\n  AVISO: servidor não honrou o Range do fim (HTTP {cauda.status_code})")
+        except Exception as exc:  # a amostra extra é bônus, não requisito
+            print(f"\n  AVISO: amostra do fim indisponível: {exc}")
+
+    universo = inicio + fim
+    if universo:
+        print("\n  exemplo:")
+        exemplo = (fim or inicio)[-1]
+        for chave, valor in exemplo.items():
             print(f"    {chave:16} = {str(valor)[:60]}")
-        preenchidos = {
-            campo: sum(1 for f in fundos if f.get(campo))
-            for campo in ("denominacao", "tipo_veiculo", "situacao", "publico_alvo", "administrador")
-        }
-        print(f"\n  campos preenchidos (de {len(fundos)}): {preenchidos}")
-        vazios = [c for c, n in preenchidos.items() if n == 0]
-        if vazios:
-            return _resultado(False, f"campos que ficaram vazios em todas as linhas: {vazios}")
-    return _resultado(True, f"{len(fundos)} fundos extraídos pelo parser de produção")
+    vazios = [campo for campo, n in _taxas(universo).items() if n == 0]
+    if vazios and fim:
+        return _resultado(False, f"campos vazios em TODAS as amostras (coluna mudou?): {vazios}")
+    if vazios:
+        # sem a amostra do fim não há como distinguir coluna renomeada de dado
+        # de época em branco — e o início vazio é o esperado; não falha por isso
+        print(f"\n  AVISO: campos vazios no início e amostra do fim indisponível: {vazios};")
+        print("  validação limitada a cabeçalho + parser nesta execução")
+    return _resultado(True, f"{len(universo)} fundos extraídos pelo parser de produção")
 
 
 def testar_cvm_informe_fii(ano: int) -> bool:

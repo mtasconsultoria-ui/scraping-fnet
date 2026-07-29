@@ -25,6 +25,7 @@ DOCS = [
         "situacaoDocumento": "AC",
         "versao": 1,
         "cnpjFundo": "11111111000191",
+        "tipoFundo": 1,
     },
     {
         # sem campo cnpjFundo: o CNPJ sai da descrição
@@ -36,6 +37,7 @@ DOCS = [
         "dataEntrega": "05/06/2026 09:30",
         "situacaoDocumento": "AC",
         "versao": 2,
+        "tipoFundo": 2,
     },
     {
         "id": 103,
@@ -47,19 +49,22 @@ DOCS = [
         "situacaoDocumento": "AC",
         "versao": 1,
         "cnpjFundo": "11111111000191",
+        "tipoFundo": 1,
     },
 ]
 
+# Espelha a página real: o placeholder de "todos" em tipoFundo é value=""
+# (não 0), e Regulamento é a categoria 5.
 FILTER_PAGE = """
 <html><body>
 <select id="tipoFundo">
-  <option value="0">Todos</option>
-  <option value="1">FII</option>
+  <option value="">Tipo de Fundo</option>
+  <option value="1">Fundo Imobiliário</option>
   <option value="2">FIDC</option>
 </select>
 <select name="idCategoriaDocumento">
-  <option value="0">Todas</option>
-  <option value="9">Regulamento</option>
+  <option value="0">Todos</option>
+  <option value="5">Regulamento</option>
 </select>
 </body></html>
 """
@@ -71,6 +76,7 @@ class FnetFake:
     def __init__(self):
         self.docs = list(DOCS)
         self.requests: list[httpx.Request] = []
+        self.fail_tipos: set[str] = set()  # tipos cuja busca responde HTTP 500
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handler)
@@ -81,6 +87,12 @@ class FnetFake:
         params = request.url.params
         if path.endswith("pesquisarGerenciadorDocumentosDados"):
             docs = sorted(self.docs, key=lambda d: d["dataEntrega"])
+            # como no FNET real: tipo específico filtra o acervo; vazio devolve
+            # só os "documentos do dia" (nenhum, neste mock)
+            tf = params.get("tipoFundo", "")
+            if tf in self.fail_tipos:
+                return httpx.Response(500, text="instabilidade simulada")
+            docs = [d for d in docs if str(d.get("tipoFundo")) == tf] if tf else []
             data_inicial = params.get("dataInicial")
             if data_inicial:
                 corte = dt.datetime.strptime(data_inicial, "%d/%m/%Y").date()
@@ -132,8 +144,17 @@ def test_detect_ext_and_base64():
 
 
 def test_iter_documents_pagina(client):
-    docs = list(client.iter_documents(page_size=2))
-    assert [d["id"] for d in docs] == [102, 101, 103]  # ordenado por dataEntrega asc
+    docs = list(client.iter_documents(page_size=1, tipo_fundo=1))
+    assert [d["id"] for d in docs] == [101, 103]  # ordenado por dataEntrega asc
+
+
+def test_iter_documents_sem_tipo_nao_percorre_o_acervo(client):
+    """Comportamento real do FNET: tipoFundo vazio só traz os docs recentes."""
+    assert list(client.iter_documents(page_size=2)) == []
+
+
+def test_listar_tipos_fundo_ignora_placeholder(client):
+    assert client.listar_tipos_fundo() == [(1, "Fundo Imobiliário"), (2, "FIDC")]
 
 
 def test_search_shape_error():
@@ -144,6 +165,7 @@ def test_search_shape_error():
 
 
 def test_sync_documentos(session, client):
+    # sem tipo informado, varre um tipo por vez (vazio não percorre o acervo)
     stats = fnet_sync.sync_documentos(session, client, page_size=2)
     session.commit()
     assert stats["documentos"] == 3
@@ -162,8 +184,9 @@ def test_sync_documentos(session, client):
     # fundos mínimos criados para a FK
     assert session.get(Fundo, "11111111000191") is not None
 
-    state = session.get(SyncState, "fnet_documentos:tf=all:cat=all")
-    assert state.cursor == "2026-06-12T15:45:00"
+    # cursor próprio por tipo de fundo
+    assert session.get(SyncState, "fnet_documentos:tf=1:cat=all").cursor == "2026-06-12T15:45:00"
+    assert session.get(SyncState, "fnet_documentos:tf=2:cat=all").cursor == "2026-06-05T09:30:00"
 
 
 def test_sync_incremental_preserva_download(session, client, fnet):
@@ -186,6 +209,7 @@ def test_sync_incremental_preserva_download(session, client, fnet):
             "dataEntrega": "20/06/2026 12:00",
             "versao": 1,
             "cnpjFundo": "11111111000191",
+            "tipoFundo": 1,
         }
     )
     fnet_sync.sync_documentos(session, client)
@@ -193,9 +217,15 @@ def test_sync_incremental_preserva_download(session, client, fnet):
 
     todos = session.execute(select(Documento)).scalars().all()
     assert {d.id_fnet for d in todos} == {101, 102, 103, 104}
-    # o cursor limitou a busca: só docs de 11/06 em diante voltaram na 2ª chamada
-    ultima_busca = [r for r in fnet.requests if "pesquisar" in r.url.path][-1]
-    assert ultima_busca.url.params["dataInicial"] == "11/06/2026"
+    # o cursor do tipo 1 limitou a busca: dataInicial = cursor (12/06) - 1 dia
+    buscas_tf1 = [
+        r
+        for r in fnet.requests
+        if "pesquisar" in r.url.path
+        and r.url.params.get("tipoFundo") == "1"
+        and "dataInicial" in r.url.params
+    ]
+    assert buscas_tf1[-1].url.params["dataInicial"] == "11/06/2026"
     # e o re-sync do 101 não desfez o download
     doc = session.get(Documento, 101)
     assert doc.status_download == "baixado"
@@ -235,7 +265,8 @@ def test_sync_dominios(session, client):
     session.commit()
     assert stats == {"grupos": 2, "opcoes": 5}
     fii = session.get(Dominio, ("tipoFundo", "1"))
-    assert fii.rotulo == "FII"
+    assert fii.rotulo == "Fundo Imobiliário"
+    assert session.get(Dominio, ("idCategoriaDocumento", "5")).rotulo == "Regulamento"
     # idempotente
     fnet_sync.sync_dominios(session, client)
     session.commit()
@@ -262,3 +293,59 @@ def test_tipo_fundo_todos_vai_vazio_nao_zero(client, fnet):
 def test_tipo_fundo_especifico_e_enviado(client, fnet):
     client.search_documents(length=1, tipo_fundo=11)  # FIAGRO
     assert fnet.requests[-1].url.params["tipoFundo"] == "11"
+
+
+def test_sync_persiste_progresso_quando_um_tipo_falha(session, client, fnet):
+    """Achado da revisão adversarial: sem commit por tipo, uma falha no tipo k
+    descartava documentos E cursores de todos os tipos já varridos."""
+    fnet.fail_tipos = {"2"}
+    with pytest.raises(RuntimeError, match="tipoFundo=2"):
+        fnet_sync.sync_documentos(session, client)
+
+    # o tipo 1, varrido antes da falha, ficou persistido (commit por tipo)
+    ids = {d.id_fnet for d in session.execute(select(Documento)).scalars()}
+    assert ids == {101, 103}
+    assert session.get(SyncState, "fnet_documentos:tf=1:cat=all").cursor == "2026-06-12T15:45:00"
+    assert session.get(SyncState, "fnet_documentos:tf=2:cat=all") is None
+
+    # na execução seguinte, com o tipo 2 recuperado, só falta o que faltava
+    fnet.fail_tipos = set()
+    fnet_sync.sync_documentos(session, client)
+    session.commit()
+    ids = {d.id_fnet for d in session.execute(select(Documento)).scalars()}
+    assert ids == {101, 102, 103}
+
+
+def test_cursor_legado_tf_all_e_aproveitado(session, client, fnet):
+    """Bancos da era pré-varredura-por-tipo não podem regredir a backfill do zero."""
+    session.add(SyncState(fonte="fnet_documentos:tf=all:cat=all", cursor="2026-06-12T15:45:00"))
+    session.commit()
+
+    fnet_sync.sync_documentos(session, client)
+    buscas = [r for r in fnet.requests if "pesquisar" in r.url.path]
+    assert buscas, "nenhuma busca executada"
+    # todos os tipos herdaram o cursor legado (12/06 - 1 dia de sobreposição)
+    assert all(r.url.params.get("dataInicial") == "11/06/2026" for r in buscas)
+    # e os cursores novos por tipo passaram a existir
+    assert session.get(SyncState, "fnet_documentos:tf=1:cat=all") is not None
+
+
+def test_competencia_aceita_data_referencia_com_hora(session, client, fnet):
+    """Formato real observado em atas: dataReferencia '29/07/2026 13:00'."""
+    fnet.docs.append(
+        {
+            "id": 105,
+            "descricaoFundo": "ALFA FII - 11.111.111/0001-91",
+            "categoriaDocumento": "Assembleia",
+            "dataReferencia": "29/07/2026 13:00",
+            "dataEntrega": "29/07/2026 17:20",
+            "versao": 1,
+            "cnpjFundo": "11111111000191",
+            "tipoFundo": 1,
+        }
+    )
+    fnet_sync.sync_documentos(session, client, tipo_fundo=1)
+    session.commit()
+    doc = session.get(Documento, 105)
+    assert doc.competencia == dt.date(2026, 7, 1)
+    assert doc.data_referencia == "29/07/2026 13:00"  # string original preservada

@@ -321,3 +321,27 @@ Fica registrada uma limitação: `create_all` cria tabelas novas mas não altera
 existentes, então colunas novas em produção exigem `ALTER TABLE` manual. Adotar
 Alembic faz sentido quando o schema estabilizar; antes disso, migrações versionadas
 seriam custo sem retorno.
+
+### Descobertas da validação com rede real (teste de fumaça, 2026-07-29)
+
+A primeira execução contra os portais — via GitHub Actions, já que o ambiente de
+desenvolvimento não os alcança — confirmou o desenho geral e corrigiu quatro
+suposições sobre comportamento que nenhuma documentação descrevia:
+
+- **Semântica do `tipoFundo` no FNET**: o valor de "todos" é string vazia (não
+  `0`, que devolve sempre zero resultados) — e vazio **não percorre o acervo**:
+  devolve só os documentos mais recentes (~centenas), enquanto FIDC sozinho tem
+  ~395 mil documentos. A varredura completa itera por tipo (ids raspados da
+  página: FIDC=2, FIAGRO=11, FII=1, FIP=10...), com cursor próprio por tipo.
+- **Metadados sem CNPJ**: `cnpjFundo` veio nulo no item observado e a descrição
+  nem sempre traz o número; a prospecção extrai o CNPJ do texto do próprio
+  documento (regulamentos e atas o trazem no preâmbulo).
+- **Download veio como PDF cru**, não base64, no caso observado; o cliente já
+  tratava ambos pelos magic bytes, então nada quebrou.
+- **CVM 175 nos informes de FII**: colunas com sufixo `_CLASSE` confirmadas
+  (`CNPJ_FUNDO_CLASSE`, `NOME_FUNDO_CLASSE`); os parsers de produção extraíram
+  7.644 informes de 2026 com PL, cotistas e valor de cota preenchidos.
+- **`cad_fi.csv` tem cauda longa de fundos mortos**: o início do arquivo é
+  dominado por fundos dos anos 90, cancelados, com público-alvo/administrador
+  legitimamente vazios. O teste de fumaça compara amostras do início e do fim
+  do arquivo para distinguir "coluna renomeada" de "dado vazio de época".

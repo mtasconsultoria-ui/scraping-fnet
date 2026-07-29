@@ -78,6 +78,24 @@ def norm_cnpj(value: str | None) -> str | None:
     return digits.zfill(14)
 
 
+def cnpj_valido(cnpj: str) -> bool:
+    """Valida os dígitos verificadores de um CNPJ já normalizado (14 dígitos).
+
+    Usado quando o CNPJ é extraído de texto livre, onde um número de protocolo
+    ou processo pode ter cara de CNPJ; os DVs eliminam quase todos.
+    """
+    if len(cnpj) != 14 or not cnpj.isdigit() or cnpj == cnpj[0] * 14:
+        return False
+
+    def dv(digitos: str, pesos: list[int]) -> str:
+        resto = sum(int(d) * p for d, p in zip(digitos, pesos)) % 11
+        return "0" if resto < 2 else str(11 - resto)
+
+    pesos1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+    pesos2 = [6, *pesos1]
+    return cnpj[12] == dv(cnpj[:12], pesos1) and cnpj[13] == dv(cnpj[:13], pesos2)
+
+
 def parse_decimal(value: str | None) -> Decimal | None:
     if not value:
         return None

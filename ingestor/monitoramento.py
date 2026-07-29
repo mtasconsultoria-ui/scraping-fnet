@@ -30,6 +30,7 @@ ERRO = "erro"
 # diária; os informes da CVM têm defasagem natural de um a dois meses.
 LIMITES_DIAS_SEM_SYNC = {"cvm": 9, "fnet": 3}
 MAX_MESES_ATRASO_INFORME = 4
+MAX_DIAS_SEM_DOCUMENTO = 7
 MAX_ERROS_DOWNLOAD = 50
 
 
@@ -217,6 +218,28 @@ def diagnosticar(session: Session, agora: dt.datetime | None = None) -> Diagnost
             diag.verificacoes.append(
                 Verificacao("informes", OK, f"competência mais recente: {competencia:%Y-%m}")
             )
+
+    # Frescor dos documentos: o sync do FNET pode terminar "ok" e ainda assim o
+    # acervo recente não ter entrado (backfill em andamento, cursor no passado)
+    if diag.contagens["documentos"]:
+        ultima_entrega = session.scalar(select(func.max(Documento.data_entrega)))
+        if ultima_entrega is not None:
+            dias_doc = (agora - ultima_entrega).days
+            if dias_doc > MAX_DIAS_SEM_DOCUMENTO:
+                diag.verificacoes.append(
+                    Verificacao(
+                        "documentos", AVISO,
+                        f"documento mais recente entregue há {dias_doc} dias — "
+                        "backfill em andamento ou sync do FNET defasado",
+                    )
+                )
+            else:
+                diag.verificacoes.append(
+                    Verificacao(
+                        "documentos", OK,
+                        f"documento mais recente entregue há {dias_doc} dia(s)",
+                    )
+                )
 
     if diag.contagens["downloads_com_erro"] > MAX_ERROS_DOWNLOAD:
         diag.verificacoes.append(

@@ -11,7 +11,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from . import busca as busca_mod
-from . import cvm_bulk, fnet_sync, text_extract
+from . import cvm_bulk, fnet_sync, prospeccao, smoke, text_extract
 from .db import get_engine, init_db
 from .fnet_client import FnetClient
 from .http_client import fetch_bytes
@@ -99,6 +99,23 @@ def main(argv: list[str] | None = None) -> int:
     p_busca.add_argument("--literal", action="store_true", help="não tolera plural/conectores")
     p_busca.add_argument("--limite", type=int, default=20)
 
+    p_smoke = sub.add_parser(
+        "smoke", help="teste de fumaça: uma requisição a cada portal (sem banco)"
+    )
+    p_smoke.add_argument("--ano-fii", type=int, default=dt.date.today().year)
+
+    p_prosp = sub.add_parser(
+        "prospectar", help="acha fundos cujo regulamento cita um termo (sem banco)"
+    )
+    p_prosp.add_argument("--termos", nargs="+", required=True)
+    p_prosp.add_argument("--alvo", type=int, default=5, help="quantos fundos trazer")
+    p_prosp.add_argument("--categoria", default="Regulamento")
+    p_prosp.add_argument("--tipo-fundo", help="rótulo do filtro no FNET (ex.: FIDC)")
+    p_prosp.add_argument("--max-documentos", type=int, default=120)
+    p_prosp.add_argument(
+        "--incluir-inativos", action="store_true", help="não exige situação ativa no cad_fi"
+    )
+
     p_status = sub.add_parser("status", help="diagnóstico de saúde da ingestão")
     p_status.add_argument("--json", action="store_true", help="saída em JSON")
     p_status.add_argument(
@@ -109,6 +126,19 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    # Estes dois não tocam o banco: servem para validar os portais sem infra
+    if args.comando == "smoke":
+        return smoke.executar(ano_fii=args.ano_fii)
+    if args.comando == "prospectar":
+        return prospeccao.prospectar(
+            args.termos,
+            alvo=args.alvo,
+            categoria=args.categoria,
+            tipo_fundo=args.tipo_fundo,
+            max_documentos=args.max_documentos,
+            apenas_ativos=not args.incluir_inativos,
+        )
 
     engine = get_engine(args.database_url)
     if args.comando == "init-db":

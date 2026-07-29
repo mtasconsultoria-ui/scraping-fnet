@@ -1,0 +1,59 @@
+# Teste de fumaça e prospecção — não usam banco, storage nem secrets.
+#
+# Existem porque o ambiente de desenvolvimento não alcança os portais da CVM e
+# da B3: é aqui que se confere, com rede de verdade, se os parâmetros da API do
+# FNET e os layouts dos CSVs da CVM continuam válidos.
+name: Teste de fumaça
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "o que rodar"
+        type: choice
+        options: [smoke, prospectar, ambos]
+        default: smoke
+      termos:
+        description: 'termos da prospecção (separados por ";")'
+        default: "CDCA;Certificado de Depósito de Créditos do Agronegócio"
+      alvo:
+        description: "quantos fundos trazer"
+        default: "5"
+      tipo_fundo:
+        description: "rótulo do tipo no FNET (ex.: FIDC); vazio = todos"
+        default: ""
+      max_documentos:
+        description: "teto de regulamentos a examinar"
+        default: "120"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+
+      - name: Teste de fumaça (formatos dos portais)
+        if: ${{ inputs.modo == 'smoke' || inputs.modo == 'ambos' }}
+        run: python -m ingestor smoke
+
+      - name: Prospecção por termo
+        if: ${{ inputs.modo == 'prospectar' || inputs.modo == 'ambos' }}
+        run: |
+          IFS=';' read -ra TERMOS <<< "${{ inputs.termos }}"
+          ARGS=()
+          for t in "${TERMOS[@]}"; do ARGS+=("$t"); done
+          EXTRA=""
+          if [ -n "${{ inputs.tipo_fundo }}" ]; then EXTRA="--tipo-fundo ${{ inputs.tipo_fundo }}"; fi
+          python -m ingestor prospectar \
+            --termos "${ARGS[@]}" \
+            --alvo "${{ inputs.alvo }}" \
+            --max-documentos "${{ inputs.max_documentos }}" \
+            $EXTRA

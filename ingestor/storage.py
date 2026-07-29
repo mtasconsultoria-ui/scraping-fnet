@@ -18,6 +18,10 @@ class Storage(Protocol):
         """Grava e retorna a URL/caminho persistido em documentos.url_storage."""
         ...
 
+    def get(self, url: str) -> bytes:
+        """Lê de volta pela URL devolvida por `put`."""
+        ...
+
 
 class LocalStorage:
     def __init__(self, root: str | Path) -> None:
@@ -28,6 +32,9 @@ class LocalStorage:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         return str(path.resolve())
+
+    def get(self, url: str) -> bytes:
+        return Path(url).read_bytes()
 
 
 class S3Storage:
@@ -42,6 +49,12 @@ class S3Storage:
         full_key = f"{self.prefix}/{key}" if self.prefix else key
         self._client.put_object(Bucket=self.bucket, Key=full_key, Body=data)
         return f"s3://{self.bucket}/{full_key}"
+
+    def get(self, url: str) -> bytes:
+        if not url.startswith("s3://"):
+            raise ValueError(f"URL não é do S3: {url}")
+        bucket, _, key = url[len("s3://") :].partition("/")
+        return self._client.get_object(Bucket=bucket, Key=key)["Body"].read()
 
 
 def storage_from_env() -> Storage:

@@ -57,3 +57,17 @@ jobs:
           python -m ingestor download-docs \
             --categorias ${{ github.event.inputs.download_categorias }} \
             --limite ${{ github.event.inputs.download_limite }}
+
+      # Só faz sentido com STORAGE_URL persistente: o extrator relê os arquivos
+      - name: Extração de texto
+        if: ${{ github.event.inputs.download_categorias != '' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          STORAGE_URL: ${{ secrets.STORAGE_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+        run: |
+          python -m ingestor extrair-textos \
+            --categorias ${{ github.event.inputs.download_categorias }} \
+            --limite ${{ github.event.inputs.download_limite }}

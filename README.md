@@ -4,10 +4,11 @@ Coleta e estruturação de dados de fundos (FII, FIDC, FIAGRO, FIP, FIF...) a pa
 Portal de Dados Abertos da CVM e do FundosNET, para filtros por características do
 fundo e por conteúdo de documentos. Arquitetura completa em [`ARQUITETURA.md`](ARQUITETURA.md).
 
-**Status: Fase 2** — Fase 1 (Dados Abertos da CVM: cadastro + informes mensais +
-métricas) e Fase 2 (documentos do FNET: metadados incrementais, download para
-storage, tabelas de domínio). Fases seguintes: full-text search de regulamentos,
-API e UI no Vercel.
+**Status: Fase 3** — Fase 1 (Dados Abertos da CVM: cadastro + informes mensais +
+métricas), Fase 2 (documentos do FNET: metadados incrementais, download para
+storage, tabelas de domínio) e Fase 3 (extração de texto dos regulamentos +
+busca combinando filtros estruturados e conteúdo). Fases seguintes: API e UI no
+Vercel; agendamento e monitoramento.
 
 ## Ingestor (Python 3.11+)
 
@@ -49,6 +50,42 @@ O corpo do `downloadDocumento` do FNET costuma vir em base64: o cliente detecta
 e decodifica pelos magic bytes, e registra o formato (`pdf`, `xml`, `zip`...).
 Re-sincronizar metadados nunca desfaz o estado de download de um documento.
 
+### Busca por conteúdo dos regulamentos (Fase 3)
+
+```bash
+# 4. extrai o texto dos PDFs baixados
+python -m ingestor extrair-textos --categorias Regulamento --limite 500
+
+# 5. o caso motivador: fundos que admitem CPR-F, com o trecho do regulamento
+python -m ingestor buscar \
+  --termos "CPR-F" "Cédula do Produto Rural Financeira" \
+  --excluir-vedacoes \
+  --tipo FIDC FIAGRO --publico-alvo qualificado --pl-min 100000000
+```
+
+Como a busca funciona (`ingestor/busca.py`, a mesma camada que a API da Fase 4
+vai expor):
+
+- **Dois passos**: um `LIKE` no SQL reduz o universo (com índice trigram no
+  Postgres, criado automaticamente quando a extensão `pg_trgm` está disponível),
+  e um regex em Python confirma e recorta os trechos. É isso que separa um
+  "CPR-F" de um "CPR" solto no meio do regulamento.
+- **Tolerante à redação jurídica**: absorve plural e troca de conectores, então
+  o termo `"Cédula do Produto Rural Financeira"` também casa
+  *"cédulas de produto rural financeiras"*, inclusive quebrado por fim de linha
+  no PDF. `--literal` desliga essa flexibilidade.
+- **Menção não é permissão**: trechos precedidos de vedação (*"é vedada a
+  aquisição de CPR-F"*) são marcados com `possivel_vedacao`; `--excluir-vedacoes`
+  descarta os documentos em que o termo só aparece proibido.
+- **Regulamento vigente** por padrão (só a versão mais recente de cada fundo);
+  `--todas-versoes` inclui o histórico.
+- Os trechos saem recortados do texto **original**, com acentuação e caixa
+  preservadas para exibição na UI.
+
+PDFs escaneados não têm camada de texto: são registrados com `origem='vazio'` e
+formam a fila de OCR, processada por `extrair-textos --ocr` (requer
+`pip install -e .[ocr]` mais `tesseract` e `poppler` no sistema).
+
 ### Datasets
 
 | Dataset | Fonte | Alimenta |
@@ -68,6 +105,9 @@ disparam `LayoutError` com diagnóstico das colunas encontradas.
 - `fundos_metricas` — derivados para os filtros: PL médio 12m, PL e cotistas atuais
 - `documentos` — metadados dos documentos do FNET (categoria, competência, situação,
   status de download, URL no storage, JSON original para diagnóstico)
+- `documento_textos` — texto extraído (`texto`) e sua forma normalizada para busca
+  (`texto_norm`: minúsculo, sem acento, **mesmo comprimento**, o que mantém os
+  offsets alinhados e permite recortar o trecho do texto original)
 - `dominios` — opções dos filtros do FNET (tipos de fundo, categorias de documento)
 - `sync_state` — cursores de sincronização
 

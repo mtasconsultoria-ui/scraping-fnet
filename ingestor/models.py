@@ -107,6 +107,27 @@ class Documento(Base):
     raw_json: Mapped[str | None] = mapped_column(Text)
 
 
+class DocumentoTexto(Base):
+    """Texto extraído de um documento, para busca por conteúdo.
+
+    `texto_norm` é `textos.fold(texto)`: mesmo comprimento, minúsculo e sem
+    acento — é sobre ele que a busca roda, e os offsets valem para os dois.
+    """
+
+    __tablename__ = "documento_textos"
+
+    id_fnet: Mapped[int] = mapped_column(
+        ForeignKey("documentos.id_fnet"), primary_key=True, autoincrement=False
+    )
+    texto: Mapped[str] = mapped_column(Text)
+    texto_norm: Mapped[str] = mapped_column(Text)
+    num_paginas: Mapped[int | None] = mapped_column(Integer)
+    num_caracteres: Mapped[int] = mapped_column(Integer, default=0)
+    # pdf | xml | texto | ocr | vazio (vazio = PDF sem camada de texto, fila de OCR)
+    origem: Mapped[str] = mapped_column(String(20), index=True)
+    extraido_em: Mapped[dt.datetime | None] = mapped_column(DateTime)
+
+
 class Dominio(Base):
     """Tabelas de domínio raspadas dos filtros do FNET (tipos de fundo, categorias...)."""
 

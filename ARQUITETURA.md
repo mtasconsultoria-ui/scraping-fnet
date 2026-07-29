@@ -251,10 +251,29 @@ um repo por app Vercel. Manter junto simplifica versionamento do schema.
 
 ## 9. Roadmap sugerido
 
-| Fase | Entrega |
-|---|---|
-| 1 | `cvm_bulk` + schema Postgres + carga de fundos/informes (filtros quantitativos já funcionam) |
-| 2 | `fnet_client` + `fnet_sync` de metadados de documentos + download de regulamentos vigentes |
-| 3 | Extração de texto + full-text search (caso CPR-F de ponta a ponta via SQL) |
-| 4 | API de consulta + UI Next.js no Vercel |
-| 5 | Agendamento, monitoramento (alertas de falha de sync) e export CSV na UI |
+| Fase | Entrega | Status |
+|---|---|---|
+| 1 | `cvm_bulk` + schema Postgres + carga de fundos/informes (filtros quantitativos já funcionam) | ✅ concluída |
+| 2 | `fnet_client` + `fnet_sync` de metadados de documentos + download de regulamentos vigentes | ✅ concluída |
+| 3 | Extração de texto + busca por conteúdo (caso CPR-F de ponta a ponta) | ✅ concluída |
+| 4 | API de consulta + UI Next.js no Vercel | pendente |
+| 5 | Agendamento, monitoramento (alertas de falha de sync) e export CSV na UI | pendente |
+
+### Ajuste de rumo na Fase 3
+
+O desenho original previa `tsvector` com dicionário `portuguese`. A implementação
+usa **prefiltro `LIKE` no SQL + confirmação por regex em Python** porque o caso de
+uso é busca por *expressão jurídica exata* ("CPR-F", "Cédula do Produto Rural
+Financeira"), não por linguagem natural: o stemmer do Postgres quebraria "CPR-F"
+em tokens e confundiria com "CPR" solto, que é justamente a distinção que importa.
+A abordagem adotada dá controle explícito sobre plural, conectores e fronteiras de
+palavra, funciona igual em SQLite (dev) e Postgres (produção), e continua rápida —
+o `LIKE` usa índice trigram (`pg_trgm`) quando disponível. Se no futuro entrar
+busca por linguagem natural sobre os documentos, `tsvector` volta como camada
+complementar, sem substituir esta.
+
+Duas descobertas da implementação viraram funcionalidade: regulamentos escrevem o
+mesmo ativo em plural e com conectores trocados (daí o matching flexível), e
+mencionar um ativo não é permiti-lo — "é vedada a aquisição de CPR-F" casaria a
+busca ingenuamente, então trechos precedidos de vedação são sinalizados e podem
+ser filtrados.

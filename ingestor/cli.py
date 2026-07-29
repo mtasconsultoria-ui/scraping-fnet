@@ -5,9 +5,12 @@ import datetime as dt
 import logging
 import sys
 
+from decimal import Decimal
+
 from sqlalchemy.orm import Session
 
-from . import cvm_bulk, fnet_sync
+from . import busca as busca_mod
+from . import cvm_bulk, fnet_sync, text_extract
 from .db import get_engine, init_db
 from .fnet_client import FnetClient
 from .http_client import fetch_bytes
@@ -67,6 +70,32 @@ def main(argv: list[str] | None = None) -> int:
     p_down.add_argument("--limite", type=int, default=100)
 
     sub.add_parser("dominios-fnet", help="raspa as tabelas de domínio dos filtros do FNET")
+
+    p_txt = sub.add_parser("extrair-textos", help="extrai texto dos documentos baixados")
+    p_txt.add_argument("--categorias", nargs="+", help='ex.: --categorias Regulamento')
+    p_txt.add_argument("--limite", type=int, default=100)
+    p_txt.add_argument("--reprocessar", action="store_true", help="refaz os já extraídos")
+    p_txt.add_argument("--ocr", action="store_true", help="processa a fila de escaneados")
+
+    p_busca = sub.add_parser("buscar", help="consulta fundos por filtros e conteúdo")
+    p_busca.add_argument("--termos", nargs="+", default=[], help='ex.: --termos "CPR-F" "Cédula do Produto Rural"')
+    p_busca.add_argument("--todos-termos", action="store_true", help="exige todos os termos")
+    p_busca.add_argument("--tipo", nargs="+", default=[], help="FII FIDC FIAGRO FIP FIF")
+    p_busca.add_argument("--publico-alvo", nargs="+", default=[], help="ex.: qualificado profissional")
+    p_busca.add_argument("--situacao", help='ex.: "EM FUNCIONAMENTO NORMAL"')
+    p_busca.add_argument("--pl-min", type=Decimal)
+    p_busca.add_argument("--pl-max", type=Decimal)
+    p_busca.add_argument("--cotistas-min", type=int)
+    p_busca.add_argument("--cotistas-max", type=int)
+    p_busca.add_argument("--categorias", nargs="+", default=["Regulamento"])
+    p_busca.add_argument("--todas-versoes", action="store_true", help="não limita ao vigente")
+    p_busca.add_argument(
+        "--excluir-vedacoes",
+        action="store_true",
+        help="descarta documentos em que o termo só aparece como vedação",
+    )
+    p_busca.add_argument("--literal", action="store_true", help="não tolera plural/conectores")
+    p_busca.add_argument("--limite", type=int, default=20)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -133,7 +162,62 @@ def main(argv: list[str] | None = None) -> int:
                 session.commit()
             finally:
                 client.close()
+        elif args.comando == "extrair-textos":
+            init_db(engine)
+            text_extract.extrair_textos(
+                session,
+                storage_from_env(),
+                categorias=args.categorias,
+                limite=args.limite,
+                reprocessar=args.reprocessar,
+                ocr=args.ocr,
+            )
+            session.commit()
+        elif args.comando == "buscar":
+            resultado = busca_mod.buscar(
+                session,
+                busca_mod.Filtros(
+                    tipos_veiculo=args.tipo,
+                    publico_alvo=args.publico_alvo,
+                    situacao=args.situacao,
+                    pl_min=args.pl_min,
+                    pl_max=args.pl_max,
+                    cotistas_min=args.cotistas_min,
+                    cotistas_max=args.cotistas_max,
+                    termos=args.termos,
+                    exigir_todos_termos=args.todos_termos,
+                    categorias_documento=args.categorias,
+                    apenas_vigente=not args.todas_versoes,
+                    excluir_vedacoes=args.excluir_vedacoes,
+                    literal=args.literal,
+                    limite=args.limite,
+                ),
+            )
+            _imprime_resultado(resultado)
     return 0
+
+
+def _fmt_milhoes(valor) -> str:
+    return f"R$ {valor / 1_000_000:,.1f}mi".replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def _imprime_resultado(resultado) -> None:
+    print(f"\n{len(resultado.fundos)} fundo(s) de {resultado.total_aproximado} encontrado(s)")
+    if resultado.truncado:
+        print("AVISO: universo de candidatos truncado; refine os filtros")
+    for fundo in resultado.fundos:
+        pl = _fmt_milhoes(fundo.pl_medio_12m) if fundo.pl_medio_12m else "PL n/d"
+        cotistas = f"{fundo.cotistas_atual} cotistas" if fundo.cotistas_atual else "cotistas n/d"
+        print(f"\n{'=' * 78}")
+        print(f"{fundo.denominacao or '(sem denominação)'}  [{fundo.cnpj}]")
+        print(f"  {fundo.tipo_veiculo or '?'} | {fundo.publico_alvo or 'público-alvo n/d'}")
+        print(f"  PL médio 12m: {pl} | {cotistas} | admin: {fundo.administrador or 'n/d'}")
+        for doc in fundo.documentos:
+            print(f"  -- {doc.categoria} ({doc.data_referencia or 's/ data'}) doc {doc.id_fnet}")
+            for trecho in doc.trechos:
+                marca = " [POSSÍVEL VEDAÇÃO]" if trecho.possivel_vedacao else ""
+                print(f"     ...{trecho.destacado()}...{marca}")
+    print()
 
 
 if __name__ == "__main__":

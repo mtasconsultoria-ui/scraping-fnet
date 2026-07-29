@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Iterable, Sequence
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from .models import Base
 
+log = logging.getLogger(__name__)
+
 DEFAULT_URL = "sqlite:///fnet.db"
 
 # Limite conservador de parâmetros por statement (sqlite antigo: 999)
 _CHUNK_ROWS = 200
+
+# Acelera o LIKE '%termo%' da busca textual; sem ele a busca funciona igual,
+# só varre mais. Exige a extensão pg_trgm (pode faltar permissão no provedor).
+_PG_TRGM_DDL = (
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+    "CREATE INDEX IF NOT EXISTS ix_documento_textos_norm_trgm "
+    "ON documento_textos USING gin (texto_norm gin_trgm_ops)",
+)
 
 
 def get_engine(url: str | None = None) -> Engine:
@@ -21,6 +32,18 @@ def get_engine(url: str | None = None) -> Engine:
 
 def init_db(engine: Engine) -> None:
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "postgresql":
+        _create_pg_trgm_index(engine)
+
+
+def _create_pg_trgm_index(engine: Engine) -> None:
+    for statement in _PG_TRGM_DDL:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(statement))
+        except Exception as exc:  # índice é otimização, não requisito
+            log.warning("índice trigram não criado (%s): %s", statement.split()[1], exc)
+            return
 
 
 def bulk_upsert(

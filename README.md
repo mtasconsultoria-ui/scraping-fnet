@@ -135,6 +135,31 @@ pytest                                                    # SQLite
 TEST_DATABASE_URL=postgresql+psycopg://... pytest          # PostgreSQL
 ```
 
+## Validando os portais antes do backfill
+
+Dois comandos que **não usam banco, storage nem secrets** — servem para conferir,
+com rede de verdade, se a API não documentada do FNET e os layouts da CVM
+continuam válidos:
+
+```bash
+# 1. Uma requisição a cada portal; imprime colunas, chaves do JSON e bytes crus
+python -m ingestor smoke
+
+# 2. Pipeline completo em escala reduzida: acha fundos cujo regulamento cita um termo
+python -m ingestor prospectar \
+  --termos "CDCA" "Certificado de Depósito de Créditos do Agronegócio" \
+  --alvo 5 --max-documentos 120
+```
+
+`prospectar` vai ao FNET, baixa os regulamentos mais recentes, extrai o texto,
+procura os termos e cruza o CNPJ com o `cad_fi.csv` da CVM para informar a
+situação cadastral — parando assim que junta o número de fundos pedido. É uma
+amostra dos documentos mais recentes, não o universo completo: para isso existe a
+ingestão, que cobre tudo e guarda o resultado.
+
+Ambos rodam também pelo workflow **Teste de fumaça** (`workflow_dispatch`), útil
+quando a máquina local não alcança os portais.
+
 ## Agendamento e monitoramento (Fase 5)
 
 A ingestão roda no GitHub Actions (não na Vercel: funções serverless têm limite de

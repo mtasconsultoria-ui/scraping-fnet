@@ -82,8 +82,8 @@ def map_tipo_veiculo(tp_fundo: str | None, denominacao: str | None) -> str | Non
 _SIT_ATIVA = "EM FUNCIONAMENTO NORMAL"
 
 
-def sync_cadastro(session: Session, fetch: FetchFn) -> dict:
-    table = CsvTable(fetch(url_cadastro()), "cad_fi.csv")
+def parse_cadastro(table: CsvTable) -> list[dict]:
+    """Extrai os fundos do cad_fi.csv. Puro: sem banco, para poder ser testado."""
     idx_cnpj = table.require("CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE")
     idx_denom = table.require("DENOM_SOCIAL")
     idx_tp = table.index_of("TP_FUNDO", "TP_FUNDO_CLASSE")
@@ -126,7 +126,11 @@ def sync_cadastro(session: Session, fetch: FetchFn) -> dict:
             },
         )
 
-    rows = [dados for _, dados in escolhidos.values()]
+    return [dados for _, dados in escolhidos.values()]
+
+
+def sync_cadastro(session: Session, fetch: FetchFn) -> dict:
+    rows = parse_cadastro(CsvTable(fetch(url_cadastro()), "cad_fi.csv"))
     bulk_upsert(
         session,
         Fundo,
@@ -210,7 +214,8 @@ def _load_fii_geral(
     idx_versao = table.index_of("VERSAO")
     idx_publico = table.index_of("PUBLICO_ALVO")
     idx_segmento = table.index_of("SEGMENTO_ATUACAO")
-    idx_denom = table.index_of("NOME_FUNDO", "DENOM_SOCIAL")
+    # a CVM 175 renomeou as colunas do informe para o sufixo _CLASSE
+    idx_denom = table.index_of("NOME_FUNDO_CLASSE", "NOME_FUNDO", "DENOM_SOCIAL")
 
     for row in table.rows:
         cnpj = norm_cnpj(cell(row, idx_cnpj))

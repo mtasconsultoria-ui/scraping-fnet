@@ -240,3 +240,25 @@ def test_sync_dominios(session, client):
     fnet_sync.sync_dominios(session, client)
     session.commit()
     assert len(session.execute(select(Dominio)).scalars().all()) == 5
+
+
+# --- achados do teste de fumaça contra o FNET real (2026-07-29) ----------------
+
+
+def test_tipo_fundo_todos_vai_vazio_nao_zero(client, fnet):
+    """No FNET, 'todos' em tipoFundo é string vazia; 0 filtra por tipo inexistente.
+
+    Foi assim que a busca voltou recordsTotal=0 na primeira execução real.
+    """
+    client.search_documents(length=1)
+    params = fnet.requests[-1].url.params
+    assert params["tipoFundo"] == ""
+    # os demais filtros, ao contrário, usam 0 como "todos" (conforme os <option>)
+    assert params["idCategoriaDocumento"] == "0"
+    assert params["idTipoDocumento"] == "0"
+    assert params["idEspecieDocumento"] == "0"
+
+
+def test_tipo_fundo_especifico_e_enviado(client, fnet):
+    client.search_documents(length=1, tipo_fundo=11)  # FIAGRO
+    assert fnet.requests[-1].url.params["tipoFundo"] == "11"

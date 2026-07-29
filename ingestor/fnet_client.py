@@ -145,13 +145,18 @@ class FnetClient:
         data_final: str | None = None,
         ordem: str = "asc",
     ) -> dict:
-        """Uma página da busca. Datas no formato dd/MM/yyyy (o que a UI envia)."""
+        """Uma página da busca. Datas no formato dd/MM/yyyy (o que a UI envia).
+
+        Atenção ao `tipoFundo`: diferente dos outros filtros, o valor de "todos"
+        é a **string vazia**, não 0 (confirmado nos <option> da página). Enviar 0
+        filtra por um tipo inexistente e a busca devolve zero resultados.
+        """
         params: dict = {
             "d": 1,
             "s": start,
             "l": length,
             f"o[0][dataEntrega]": ordem,
-            "tipoFundo": tipo_fundo or 0,
+            "tipoFundo": tipo_fundo if tipo_fundo else "",
             "idCategoriaDocumento": id_categoria or 0,
             "idTipoDocumento": id_tipo or 0,
             "idEspecieDocumento": id_especie or 0,

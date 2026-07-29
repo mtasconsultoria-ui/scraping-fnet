@@ -16,15 +16,13 @@ import zipfile
 
 import httpx
 
+from . import cvm_bulk
 from .cvm_bulk import url_cadastro, url_fii
 from .fnet_client import BROWSER_HEADERS, FnetClient, detect_ext
-from .parsing import CsvTable
+from .parsing import CsvTable, LayoutError
 
 log = logging.getLogger(__name__)
 
-# Colunas de que os loaders dependem; se sumirem, a ingestão quebra
-COLUNAS_CADASTRO = ("CNPJ_FUNDO", "DENOM_SOCIAL", "SIT", "TP_FUNDO")
-COLUNAS_FII_GERAL = ("CNPJ_FUNDO", "DATA_REFERENCIA")
 CAMPOS_FNET = ("id", "descricaoFundo", "categoriaDocumento", "dataEntrega")
 
 LARGURA = 78
@@ -62,16 +60,26 @@ def testar_cvm_cadastro() -> bool:
     print(f"\n  colunas encontradas ({len(tabela.columns)}):")
     print(f"    {sorted(tabela.columns)}")
 
-    faltando = [c for c in COLUNAS_CADASTRO if tabela.index_of(c) is None]
-    if tabela.rows:
-        print("\n  primeira linha:")
-        for coluna, indice in sorted(tabela.columns.items(), key=lambda kv: kv[1])[:12]:
-            valor = tabela.rows[0][indice] if indice < len(tabela.rows[0]) else ""
-            print(f"    {coluna:24} = {valor[:60]}")
+    # o teste real é o parser de produção rodando sobre o arquivo de verdade
+    try:
+        fundos = cvm_bulk.parse_cadastro(tabela)
+    except LayoutError as exc:
+        return _resultado(False, f"parse_cadastro falhou: {exc}")
 
-    if faltando:
-        return _resultado(False, f"colunas obrigatórias ausentes: {faltando}")
-    return _resultado(True, f"{len(tabela.rows)} linhas no recorte, colunas esperadas presentes")
+    print(f"\n  parse_cadastro extraiu {len(fundos)} fundos do recorte")
+    if fundos:
+        print("  exemplo:")
+        for chave, valor in list(fundos[0].items()):
+            print(f"    {chave:16} = {str(valor)[:60]}")
+        preenchidos = {
+            campo: sum(1 for f in fundos if f.get(campo))
+            for campo in ("denominacao", "tipo_veiculo", "situacao", "publico_alvo", "administrador")
+        }
+        print(f"\n  campos preenchidos (de {len(fundos)}): {preenchidos}")
+        vazios = [c for c, n in preenchidos.items() if n == 0]
+        if vazios:
+            return _resultado(False, f"campos que ficaram vazios em todas as linhas: {vazios}")
+    return _resultado(True, f"{len(fundos)} fundos extraídos pelo parser de produção")
 
 
 def testar_cvm_informe_fii(ano: int) -> bool:
@@ -94,22 +102,109 @@ def testar_cvm_informe_fii(ano: int) -> bool:
     for nome in arquivo.namelist()[:10]:
         print(f"    {nome}")
 
-    geral = next((n for n in arquivo.namelist() if "geral" in n.lower()), None)
-    if geral is None:
-        return _resultado(False, "nenhum arquivo 'geral' no zip")
+    # todas as tabelas: um nome de coluna que mudou em qualquer uma delas
+    # esvazia silenciosamente um campo da busca
+    tabelas: dict[str, CsvTable] = {}
+    for token in ("geral", "complemento", "ativo_passivo"):
+        nome = next((n for n in arquivo.namelist() if token in n.lower()), None)
+        if nome is None:
+            print(f"\n  AVISO: nenhum arquivo '{token}' no zip")
+            continue
+        tabela = CsvTable(arquivo.read(nome), nome)
+        tabelas[token] = tabela
+        print(f"\n  colunas de {nome} ({len(tabela.columns)}):")
+        print(f"    {sorted(tabela.columns)}")
 
-    tabela = CsvTable(arquivo.read(geral), geral)
-    print(f"\n  colunas de {geral} ({len(tabela.columns)}):")
-    print(f"    {sorted(tabela.columns)}")
-    faltando = [c for c in COLUNAS_FII_GERAL if tabela.index_of(c) is None]
-    if faltando:
-        return _resultado(False, f"colunas obrigatórias ausentes: {faltando}")
-    return _resultado(True, f"{len(tabela.rows):,} linhas em {geral}")
+    if "geral" not in tabelas:
+        return _resultado(False, "arquivo 'geral' ausente: o loader não tem como funcionar")
+
+    # roda os parsers de produção sobre os arquivos reais
+    informes: dict = {}
+    atributos: dict = {}
+    try:
+        cvm_bulk._load_fii_geral(tabelas["geral"], informes, atributos)
+        if "complemento" in tabelas:
+            cvm_bulk._load_fii_complemento(tabelas["complemento"], informes)
+        if "ativo_passivo" in tabelas:
+            cvm_bulk._load_fii_ativo_passivo(tabelas["ativo_passivo"], informes)
+    except LayoutError as exc:
+        return _resultado(False, f"parser do informe falhou: {exc}")
+
+    com_pl = sum(1 for v in informes.values() if v.get("pl") is not None)
+    com_cotistas = sum(1 for v in informes.values() if v.get("num_cotistas") is not None)
+    com_cota = sum(1 for v in informes.values() if v.get("valor_cota") is not None)
+    com_denom = sum(1 for v in atributos.values() if v.get("denominacao"))
+    com_publico = sum(1 for v in atributos.values() if v.get("publico_alvo"))
+
+    print(f"\n  parsers de produção sobre o arquivo real:")
+    print(f"    informes montados      {len(informes):,}")
+    print(f"    com PL                 {com_pl:,}")
+    print(f"    com nº de cotistas     {com_cotistas:,}")
+    print(f"    com valor de cota      {com_cota:,}")
+    print(f"    fundos com denominação {com_denom:,} (de {len(atributos):,})")
+    print(f"    fundos com público-alvo{com_publico:,} (de {len(atributos):,})")
+
+    if not informes:
+        return _resultado(False, "nenhum informe extraído: chaves CNPJ/competência mudaram")
+    vazios = [
+        nome
+        for nome, valor in (
+            ("PL", com_pl), ("cotistas", com_cotistas), ("valor da cota", com_cota),
+            ("denominação", com_denom), ("público-alvo", com_publico),
+        )
+        if valor == 0
+    ]
+    if vazios:
+        return _resultado(False, f"campos vazios em TODAS as linhas (coluna renomeada?): {vazios}")
+    return _resultado(True, f"{len(informes):,} informes extraídos com todos os campos")
+
+
+def _sondar_variantes(client: FnetClient) -> None:
+    """Testa combinações de parâmetros e mostra qual retorna resultados.
+
+    O valor de "todos" difere entre os filtros do FNET (string vazia em uns, 0
+    em outros). Em vez de apostar numa hipótese, mede-se cada variante.
+    """
+    import time as _time
+
+    variantes: list[tuple[str, dict]] = [
+        ("tipoFundo vazio (todos)", {"tipoFundo": ""}),
+        ("tipoFundo=0", {"tipoFundo": 0}),
+        ("sem o parâmetro tipoFundo", {}),
+        ("tipoFundo=2 (FIDC)", {"tipoFundo": 2}),
+        ("tipoFundo=11 (FIAGRO)", {"tipoFundo": 11}),
+    ]
+    print("\n  sondagem de parâmetros (recordsTotal por variante):")
+    for rotulo, extra in variantes:
+        params = {
+            "d": 1, "s": 0, "l": 1, "o[0][dataEntrega]": "desc",
+            "idCategoriaDocumento": 0, "idTipoDocumento": 0, "idEspecieDocumento": 0,
+            "paginaCertificados": "false", "_": int(_time.time() * 1000),
+            **extra,
+        }
+        try:
+            resposta = client._get(
+                "pesquisarGerenciadorDocumentosDados",
+                params=params,
+                headers={
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": f"{client.base_url}/abrirGerenciadorDocumentosCVM",
+                },
+            )
+            corpo = resposta.json()
+            total = corpo.get("recordsTotal")
+            itens = len(corpo.get("data") or [])
+            print(f"    {rotulo:30} -> recordsTotal={total!s:>10}  itens={itens}")
+        except Exception as exc:
+            print(f"    {rotulo:30} -> {type(exc).__name__}: {str(exc)[:50]}")
 
 
 def testar_fnet_busca(client: FnetClient) -> dict | None:
     _titulo("3/4  FNET — API de busca de documentos")
-    print(f"GET {client.base_url}/pesquisarGerenciadorDocumentosDados  (l=3)")
+    _sondar_variantes(client)
+
+    print(f"\nGET {client.base_url}/pesquisarGerenciadorDocumentosDados  (l=3, como o código usa)")
     try:
         payload = client.search_documents(start=0, length=3, ordem="desc")
     except Exception as exc:
@@ -181,8 +276,15 @@ def testar_dominios(client: FnetClient) -> bool:
         if not opcoes:
             continue
         print(f"\n  {grupo} ({len(opcoes)} opções):")
-        for valor, rotulo in opcoes[:25]:
+        for valor, rotulo in opcoes:  # sem truncar: os ids alimentam os filtros
             print(f"    {valor:>6} = {rotulo}")
+
+    # o id de Regulamento é o que a prospecção usa para achar os documentos certos
+    categorias = grupos.get("categoriaDocumento") or []
+    regulamento = next((v for v, r in categorias if r.strip().lower() == "regulamento"), None)
+    print(f"\n  id da categoria 'Regulamento': {regulamento or 'NÃO ENCONTRADO'}")
+    if regulamento is None:
+        return _resultado(False, "categoria 'Regulamento' ausente na lista de filtros")
     return _resultado(True, f"{len(grupos)} grupos de filtro lidos")
 
 

@@ -194,3 +194,35 @@ def test_map_tipo_veiculo():
     assert cvm_bulk.map_tipo_veiculo("FIP MULT", "DELTA") == "FIP"
     assert cvm_bulk.map_tipo_veiculo("FI", "EPSILON RF") == "FIF"
     assert cvm_bulk.map_tipo_veiculo(None, None) is None
+
+
+# --- achados do teste de fumaça contra os dados reais da CVM (2026-07-29) ------
+
+FII_GERAL_CVM175 = """CNPJ_FUNDO_CLASSE;DATA_REFERENCIA;VERSAO;NOME_FUNDO_CLASSE;PUBLICO_ALVO;SEGMENTO_ATUACAO
+11.111.111/0001-91;2026-05;1;ALFA FII CLASSE UNICA;Investidores em Geral;Hibrido
+""".encode("latin-1")
+
+
+def test_fii_geral_aceita_colunas_renomeadas_pela_cvm175(session):
+    """O arquivo real usa CNPJ_FUNDO_CLASSE e NOME_FUNDO_CLASSE."""
+    zipado = make_zip({"inf_mensal_fii_geral_2026.csv": FII_GERAL_CVM175})
+    cvm_bulk.sync_fii_informes(
+        session, fetch_for(**{"inf_mensal_fii_2026.zip": zipado}), anos=[2026]
+    )
+    session.commit()
+
+    fundo = session.get(Fundo, CNPJ_FII)
+    assert fundo.denominacao == "ALFA FII CLASSE UNICA"  # veio de NOME_FUNDO_CLASSE
+    assert fundo.publico_alvo == "Investidores em Geral"
+    assert fundo.segmento == "Hibrido"
+
+
+def test_parse_cadastro_e_puro(session):
+    """parse_cadastro roda sem banco — é o que o smoke usa para validar o layout."""
+    from ingestor.parsing import CsvTable
+
+    fundos = cvm_bulk.parse_cadastro(CsvTable(CAD_FI, "cad_fi.csv"))
+    assert len(fundos) == 3
+    alfa = next(f for f in fundos if f["cnpj"] == CNPJ_FII)
+    assert alfa["administrador"] == "ADMIN A"
+    assert alfa["tipo_veiculo"] == "FII"

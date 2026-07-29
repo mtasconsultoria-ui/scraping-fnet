@@ -1,6 +1,8 @@
 import { FILTROS_PADRAO, type Filtros } from "./busca";
 
 const LIMITE_MAXIMO = 200;
+/** Teto de linhas do export CSV — alto o bastante para o filtro inteiro. */
+export const LIMITE_EXPORT = 2000;
 
 function num(value: string | null | undefined): number | undefined {
   if (!value) return undefined;
@@ -17,9 +19,13 @@ function lista(params: URLSearchParams, chave: string): string[] {
 }
 
 /** Traduz a query string (da UI ou de um cliente externo) em `Filtros`. */
-export function filtrosDaQuery(params: URLSearchParams): Filtros {
+export function filtrosDaQuery(
+  params: URLSearchParams,
+  opcoes: { export?: boolean } = {},
+): Filtros {
   const categorias = lista(params, "categoria");
-  const limite = num(params.get("limite")) ?? FILTROS_PADRAO.limite;
+  const tetoLimite = opcoes.export ? LIMITE_EXPORT : LIMITE_MAXIMO;
+  const limite = num(params.get("limite")) ?? (opcoes.export ? LIMITE_EXPORT : FILTROS_PADRAO.limite);
   return {
     ...FILTROS_PADRAO,
     termos: lista(params, "termo"),
@@ -35,7 +41,8 @@ export function filtrosDaQuery(params: URLSearchParams): Filtros {
     cotistasMax: num(params.get("cotistasMax")),
     categorias: categorias.length ? categorias : FILTROS_PADRAO.categorias,
     apenasVigente: params.get("todasVersoes") !== "1",
-    limite: Math.min(Math.max(limite, 1), LIMITE_MAXIMO),
-    offset: num(params.get("offset")) ?? 0,
+    limite: Math.min(Math.max(limite, 1), tetoLimite),
+    // o export ignora a paginação da tela: leva o filtro inteiro
+    offset: opcoes.export ? 0 : num(params.get("offset")) ?? 0,
   };
 }

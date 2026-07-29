@@ -5,6 +5,7 @@ import datetime as dt
 import logging
 import sys
 
+import json
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from .db import get_engine, init_db
 from .fnet_client import FnetClient
 from .http_client import fetch_bytes
 from .metricas import recompute_metricas
+from .monitoramento import AVISO, ERRO, diagnosticar, registrar_execucao
 from .storage import storage_from_env
 
 log = logging.getLogger("ingestor")
@@ -97,6 +99,14 @@ def main(argv: list[str] | None = None) -> int:
     p_busca.add_argument("--literal", action="store_true", help="não tolera plural/conectores")
     p_busca.add_argument("--limite", type=int, default=20)
 
+    p_status = sub.add_parser("status", help="diagnóstico de saúde da ingestão")
+    p_status.add_argument("--json", action="store_true", help="saída em JSON")
+    p_status.add_argument(
+        "--check",
+        action="store_true",
+        help="encerra com código 1 se houver problema (usar no agendamento)",
+    )
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -109,19 +119,20 @@ def main(argv: list[str] | None = None) -> int:
     with Session(engine) as session:
         if args.comando == "sync-cvm":
             init_db(engine)  # idempotente; garante schema em bancos novos
-            if "cadastro" in args.datasets:
-                cvm_bulk.sync_cadastro(session, fetch_bytes)
+            with registrar_execucao(session, "cvm") as stats:
+                if "cadastro" in args.datasets:
+                    stats["cadastro"] = cvm_bulk.sync_cadastro(session, fetch_bytes)
+                    session.commit()
+                if "fii" in args.datasets:
+                    stats["fii"] = cvm_bulk.sync_fii_informes(session, fetch_bytes, args.anos)
+                    session.commit()
+                if "fidc" in args.datasets:
+                    competencias = args.competencias_fidc or _competencias_fidc(args.anos)
+                    stats["fidc"] = cvm_bulk.sync_fidc_informes(session, fetch_bytes, competencias)
+                    session.commit()
+                stats["metricas"] = recompute_metricas(session)
                 session.commit()
-            if "fii" in args.datasets:
-                cvm_bulk.sync_fii_informes(session, fetch_bytes, args.anos)
-                session.commit()
-            if "fidc" in args.datasets:
-                competencias = args.competencias_fidc or _competencias_fidc(args.anos)
-                cvm_bulk.sync_fidc_informes(session, fetch_bytes, competencias)
-                session.commit()
-            total = recompute_metricas(session)
-            session.commit()
-            log.info("métricas recalculadas para %s fundos", total)
+                log.info("métricas recalculadas para %s fundos", stats["metricas"])
         elif args.comando == "metricas":
             total = recompute_metricas(session)
             session.commit()
@@ -130,28 +141,34 @@ def main(argv: list[str] | None = None) -> int:
             init_db(engine)
             client = FnetClient()
             try:
-                fnet_sync.sync_documentos(
-                    session,
-                    client,
-                    tipo_fundo=args.tipo_fundo,
-                    id_categoria=args.categoria,
-                    desde=dt.date.fromisoformat(args.desde) if args.desde else None,
-                    max_pages=args.max_paginas,
-                )
-                session.commit()
+                with registrar_execucao(session, "fnet_documentos") as stats:
+                    stats.update(
+                        fnet_sync.sync_documentos(
+                            session,
+                            client,
+                            tipo_fundo=args.tipo_fundo,
+                            id_categoria=args.categoria,
+                            desde=dt.date.fromisoformat(args.desde) if args.desde else None,
+                            max_pages=args.max_paginas,
+                        )
+                    )
+                    session.commit()
             finally:
                 client.close()
         elif args.comando == "download-docs":
             client = FnetClient()
             try:
-                fnet_sync.download_documentos(
-                    session,
-                    client,
-                    storage_from_env(),
-                    categorias=args.categorias,
-                    limite=args.limite,
-                )
-                session.commit()
+                with registrar_execucao(session, "fnet_download") as stats:
+                    stats.update(
+                        fnet_sync.download_documentos(
+                            session,
+                            client,
+                            storage_from_env(),
+                            categorias=args.categorias,
+                            limite=args.limite,
+                        )
+                    )
+                    session.commit()
             finally:
                 client.close()
         elif args.comando == "dominios-fnet":
@@ -164,15 +181,29 @@ def main(argv: list[str] | None = None) -> int:
                 client.close()
         elif args.comando == "extrair-textos":
             init_db(engine)
-            text_extract.extrair_textos(
-                session,
-                storage_from_env(),
-                categorias=args.categorias,
-                limite=args.limite,
-                reprocessar=args.reprocessar,
-                ocr=args.ocr,
-            )
-            session.commit()
+            with registrar_execucao(session, "fnet_textos") as stats:
+                stats.update(
+                    text_extract.extrair_textos(
+                        session,
+                        storage_from_env(),
+                        categorias=args.categorias,
+                        limite=args.limite,
+                        reprocessar=args.reprocessar,
+                        ocr=args.ocr,
+                    )
+                )
+                session.commit()
+        elif args.comando == "status":
+            # bancos criados por versões anteriores podem não ter todas as
+            # tabelas; create_all é idempotente e adiciona as que faltarem
+            init_db(engine)
+            diag = diagnosticar(session)
+            if args.json:
+                print(json.dumps(diag.to_dict(), ensure_ascii=False, indent=2, default=str))
+            else:
+                _imprime_diagnostico(diag)
+            if args.check and not diag.saudavel:
+                return 1
         elif args.comando == "buscar":
             resultado = busca_mod.buscar(
                 session,
@@ -195,6 +226,29 @@ def main(argv: list[str] | None = None) -> int:
             )
             _imprime_resultado(resultado)
     return 0
+
+
+_SIMBOLO = {"ok": "OK  ", AVISO: "AVISO", ERRO: "ERRO"}
+
+
+def _imprime_diagnostico(diag) -> None:
+    print(f"\nstatus geral: {diag.status.upper()}\n")
+    print("verificações:")
+    for verificacao in diag.verificacoes:
+        print(f"  [{_SIMBOLO[verificacao.status]}] {verificacao.nome}: {verificacao.mensagem}")
+    print("\ncontagens:")
+    for chave, valor in diag.contagens.items():
+        print(f"  {chave:22} {valor:>10,}".replace(",", "."))
+    if diag.ultimas_execucoes:
+        print("\núltimas execuções:")
+        for run in diag.ultimas_execucoes:
+            quando = (run["terminadoEm"] or run["iniciadoEm"] or "")[:19].replace("T", " ")
+            print(f"  {run['fonte']:20} {run['status']:10} {quando}")
+            if run["detalhe"]:
+                print(f"    {json.dumps(run['detalhe'], ensure_ascii=False)}")
+            if run["erro"]:
+                print(f"    erro: {run['erro'][:200]}")
+    print()
 
 
 def _fmt_milhoes(valor) -> str:

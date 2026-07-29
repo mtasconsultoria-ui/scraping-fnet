@@ -146,6 +146,18 @@ button {
   color: var(--muted);
 }
 
+.export {
+  margin-left: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
 .fundo {
   background: var(--surface);
   border: 1px solid var(--border);

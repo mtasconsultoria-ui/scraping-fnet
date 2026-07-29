@@ -1,13 +1,15 @@
-# Sincronização de documentos do FNET (metadados + download de arquivos).
+# Sincronização de documentos do FNET: metadados, download e extração de texto.
 #
-# Requer secrets:
+# Secrets:
 #   DATABASE_URL  Postgres (Neon/Supabase)
-#   STORAGE_URL   opcional; s3://bucket/prefixo p/ guardar os PDFs (com AWS_* /
-#                 S3_ENDPOINT_URL). Sem ele os arquivos não persistem fora do runner,
-#                 então só o sync de metadados é útil.
+#   STORAGE_URL   s3://bucket/prefixo para os PDFs (com AWS_* / S3_ENDPOINT_URL).
+#                 Sem ele os arquivos não persistem fora do runner, e as etapas
+#                 de download e extração são puladas.
 name: Ingestão FNET
 
 on:
+  schedule:
+    - cron: "0 9 * * *" # diário, 06:00 BRT
   workflow_dispatch:
     inputs:
       tipo_fundo:
@@ -20,24 +22,41 @@ on:
         description: "data inicial AAAA-MM-DD (vazio = cursor)"
         default: ""
       download_categorias:
-        description: "categorias p/ baixar arquivos (vazio = não baixa)"
+        description: "categorias p/ baixar arquivos (vazio = usa o padrão do agendamento)"
         default: ""
       download_limite:
         description: "máximo de arquivos por execução"
         default: "200"
 
+permissions:
+  contents: read
+  issues: write
+
+env:
+  # No agendamento, prioriza regulamentos — é deles que sai a busca por conteúdo
+  CATEGORIAS_PADRAO: Regulamento
+  LIMITE_PADRAO: "200"
+
 jobs:
   fnet:
     runs-on: ubuntu-latest
+    timeout-minutes: 300 # rate limit de ~1 req/s torna a varredura demorada
+    # `secrets` não existe no contexto de `if` de step; passando por env, as
+    # etapas que dependem do storage podem ser puladas quando ele não existe
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      STORAGE_URL: ${{ secrets.STORAGE_URL }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -e .[postgres,s3]
-      - name: Domínios + sync de metadados
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Domínios + metadados dos documentos
         run: |
           python -m ingestor dominios-fnet
           ARGS=""
@@ -45,29 +64,52 @@ jobs:
           [ -n "${{ github.event.inputs.categoria }}" ] && ARGS="$ARGS --categoria ${{ github.event.inputs.categoria }}"
           [ -n "${{ github.event.inputs.desde }}" ] && ARGS="$ARGS --desde ${{ github.event.inputs.desde }}"
           python -m ingestor sync-fnet $ARGS
-      - name: Download de arquivos
-        if: ${{ github.event.inputs.download_categorias != '' }}
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          STORAGE_URL: ${{ secrets.STORAGE_URL }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+
+      - name: Download dos arquivos
+        if: ${{ env.STORAGE_URL != '' }}
         run: |
           python -m ingestor download-docs \
-            --categorias ${{ github.event.inputs.download_categorias }} \
-            --limite ${{ github.event.inputs.download_limite }}
+            --categorias ${{ github.event.inputs.download_categorias || env.CATEGORIAS_PADRAO }} \
+            --limite ${{ github.event.inputs.download_limite || env.LIMITE_PADRAO }}
 
-      # Só faz sentido com STORAGE_URL persistente: o extrator relê os arquivos
       - name: Extração de texto
-        if: ${{ github.event.inputs.download_categorias != '' }}
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          STORAGE_URL: ${{ secrets.STORAGE_URL }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+        if: ${{ env.STORAGE_URL != '' }}
         run: |
           python -m ingestor extrair-textos \
-            --categorias ${{ github.event.inputs.download_categorias }} \
-            --limite ${{ github.event.inputs.download_limite }}
+            --categorias ${{ github.event.inputs.download_categorias || env.CATEGORIAS_PADRAO }} \
+            --limite ${{ github.event.inputs.download_limite || env.LIMITE_PADRAO }}
+
+      - name: Diagnóstico
+        run: python -m ingestor status --check
+
+      - name: Alerta em caso de falha
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const titulo = 'Falha na ingestão FNET';
+            const { data: existentes } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'ingestao',
+            });
+            const corpo = [
+              `A ingestão do FNET falhou em ${new Date().toISOString()}.`,
+              '',
+              `Execução: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'A API do FNET não é documentada e pode mudar sem aviso: FnetShapeError',
+              'indica resposta em formato inesperado. Verifique também bloqueio por',
+              'rate limit e a validade das credenciais de storage.',
+            ].join('\n');
+            const aberta = existentes.find((i) => i.title === titulo);
+            if (aberta) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: aberta.number, body: corpo,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: titulo, body: corpo, labels: ['ingestao'],
+              });
+            }

@@ -33,9 +33,11 @@ Os testes de integração criam as tabelas que usam e são **pulados** quando
 | Rota | O que faz |
 |---|---|
 | `GET /api/fundos` | busca por filtros e conteúdo; devolve fundos, documentos e trechos |
+| `GET /api/fundos?formato=csv` | a mesma consulta como planilha (ver abaixo) |
 | `GET /api/fundos/{cnpj}` | cadastro, série mensal de PL/cotistas e documentos do fundo (CNPJ só com dígitos) |
 | `GET /api/documentos/{id}?termo=` | metadados do documento e trechos do termo |
 | `GET /api/dominios` | valores disponíveis para popular os filtros |
+| `GET /api/health` | diagnóstico da ingestão; HTTP 503 quando há erro |
 
 Parâmetros de `/api/fundos` (repetíveis ou separados por vírgula): `termo`, `tipo`,
 `publicoAlvo`, `categoria`. Escalares: `situacao`, `plMin`, `plMax`, `cotistasMin`,
@@ -48,6 +50,23 @@ curl -G localhost:3000/api/fundos \
   --data-urlencode "termo=Cédula do Produto Rural Financeira" \
   -d excluirVedacoes=1 -d tipo=FIDC -d tipo=FIAGRO -d plMin=100000000
 ```
+
+### Export CSV
+
+`formato=csv` devolve a consulta como planilha, com uma linha por documento
+(colunas do fundo, do documento, os trechos encontrados e `possivel_vedacao`).
+O export **ignora a paginação da tela** e leva o filtro inteiro, até 2000 linhas;
+o teto real da consulta vai no cabeçalho `X-Total-Aproximado`.
+
+O arquivo sai com separador `;` e BOM UTF-8 — é o que faz o Excel em português
+abrir as colunas e os acentos corretamente.
+
+### Monitoração
+
+`GET /api/health` espelha `python -m ingestor status`: verifica se a última
+execução de cada fonte falhou ou ficou velha e se a competência dos informes
+avançou. Responde **503** quando há erro, para que um monitor de uptime dispare
+sem precisar interpretar o corpo da resposta.
 
 ### `totalAproximado` vs `exibidos`
 

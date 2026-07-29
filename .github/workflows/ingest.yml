@@ -1,13 +1,13 @@
-# Ingestão real dos Dados Abertos da CVM.
+# Ingestão dos Dados Abertos da CVM (cadastro + informes mensais + métricas).
 #
-# Requer o secret DATABASE_URL apontando para o Postgres (Neon/Supabase), ex.:
-#   postgresql+psycopg://user:senha@host/db?sslmode=require
+# Secrets: DATABASE_URL (postgresql+psycopg://user:senha@host/db?sslmode=require)
 #
-# Disparo manual (workflow_dispatch) para o backfill; o agendamento semanal
-# entra na Fase 5 (descomentar o bloco schedule).
+# Os CSVs da CVM são atualizados semanalmente; rodar todo dia só gastaria banda.
 name: Ingestão CVM
 
 on:
+  schedule:
+    - cron: "0 10 * * 1" # segundas, 07:00 BRT
   workflow_dispatch:
     inputs:
       datasets:
@@ -16,18 +16,22 @@ on:
       anos:
         description: "anos dos informes"
         default: "2025 2026"
-  # schedule:
-  #   - cron: "0 10 * * 1"  # segundas 07:00 BRT (CSVs da CVM atualizam semanalmente)
+
+permissions:
+  contents: read
+  issues: write # para abrir a issue de alerta em caso de falha
 
 jobs:
   ingest:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -e .[postgres]
+
       - name: Sync CVM
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -35,3 +39,42 @@ jobs:
           python -m ingestor sync-cvm \
             --datasets ${{ github.event.inputs.datasets || 'cadastro fii' }} \
             --anos ${{ github.event.inputs.anos || '2025 2026' }}
+
+      # Falha o job quando os dados param de avançar, mesmo sem exceção:
+      # portal mudou de layout, cursor travado, credencial expirada.
+      - name: Diagnóstico
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m ingestor status --check
+
+      - name: Alerta em caso de falha
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const titulo = 'Falha na ingestão CVM';
+            const { data: existentes } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'ingestao',
+            });
+            const corpo = [
+              `A ingestão da CVM falhou em ${new Date().toISOString()}.`,
+              '',
+              `Execução: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'Causas frequentes: mudança de layout dos CSVs da CVM (o loader falha com',
+              'LayoutError listando as colunas encontradas), indisponibilidade do portal',
+              'ou dados sem avanço de competência.',
+            ].join('\n');
+            const aberta = existentes.find((i) => i.title === titulo);
+            if (aberta) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: aberta.number, body: corpo,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: titulo, body: corpo, labels: ['ingestao'],
+              });
+            }

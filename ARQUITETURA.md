@@ -257,7 +257,7 @@ um repo por app Vercel. Manter junto simplifica versionamento do schema.
 | 2 | `fnet_client` + `fnet_sync` de metadados de documentos + download de regulamentos vigentes | ✅ concluída |
 | 3 | Extração de texto + busca por conteúdo (caso CPR-F de ponta a ponta) | ✅ concluída |
 | 4 | API de consulta + UI Next.js no Vercel | ✅ concluída |
-| 5 | Agendamento, monitoramento (alertas de falha de sync) e export CSV na UI | pendente |
+| 5 | Agendamento, monitoramento (alertas de falha de sync) e export CSV na UI | ✅ concluída |
 
 ### Ajuste de rumo na Fase 3
 
@@ -302,3 +302,22 @@ declarado, o SQLAlchemy desconhecia a dependência entre entidades e emitia
 `INSERT` em `documentos` antes de `fundos`. O SQLite aceitava (ignora foreign keys
 por padrão), o PostgreSQL de produção rejeitaria. Corrigido com os relacionamentos,
 com `PRAGMA foreign_keys=ON` no SQLite e rodando a suíte também contra PostgreSQL.
+
+### Ajuste de rumo na Fase 5
+
+O plano falava em "alertas de falha de sync". Na prática, a falha que mais
+importa **não levanta exceção**: o job roda, termina com sucesso e nada de novo
+entra no banco — porque o layout do portal mudou de um jeito tolerado, o cursor
+travou ou a credencial expirou. Um alerta preso a exceções não veria nada disso.
+
+Por isso o monitoramento é baseado em *frescor*, não só em erro: `sync_runs`
+guarda o histórico de execuções, e `status --check` falha quando a última
+execução de uma fonte envelheceu além do limite ou quando a competência dos
+informes parou de avançar. É esse comando que fecha cada workflow agendado, de
+modo que dados parados derrubam o job e abrem uma issue — o mesmo caminho de um
+erro explícito. `GET /api/health` expõe o diagnóstico para monitoração externa.
+
+Fica registrada uma limitação: `create_all` cria tabelas novas mas não altera as
+existentes, então colunas novas em produção exigem `ALTER TABLE` manual. Adotar
+Alembic faz sentido quando o schema estabilizar; antes disso, migrações versionadas
+seriam custo sem retorno.

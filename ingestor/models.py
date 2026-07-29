@@ -162,3 +162,19 @@ class SyncState(Base):
     atualizado_em: Mapped[dt.datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class SyncRun(Base):
+    """Histórico de execuções da ingestão — base do diagnóstico e dos alertas."""
+
+    __tablename__ = "sync_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fonte: Mapped[str] = mapped_column(String(40), index=True)
+    iniciado_em: Mapped[dt.datetime] = mapped_column(DateTime, index=True)
+    terminado_em: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    # executando | ok | erro
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    # estatísticas da execução, em JSON (ex.: {"documentos": 120})
+    detalhe: Mapped[str | None] = mapped_column(Text)
+    erro: Mapped[str | None] = mapped_column(Text)

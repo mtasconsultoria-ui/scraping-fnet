@@ -4,12 +4,10 @@ Coleta e estruturação de dados de fundos (FII, FIDC, FIAGRO, FIP, FIF...) a pa
 Portal de Dados Abertos da CVM e do FundosNET, para filtros por características do
 fundo e por conteúdo de documentos. Arquitetura completa em [`ARQUITETURA.md`](ARQUITETURA.md).
 
-**Status: Fase 4** — Fase 1 (Dados Abertos da CVM: cadastro + informes mensais +
-métricas), Fase 2 (documentos do FNET: metadados incrementais, download para
-storage, tabelas de domínio), Fase 3 (extração de texto dos regulamentos + busca
-combinando filtros estruturados e conteúdo) e Fase 4 (API de consulta e interface
-Next.js para deploy na Vercel — ver [`web/`](web/README.md)). Fase seguinte:
-agendamento, monitoramento e export CSV.
+**Status: completo (Fases 1 a 5).** Ingestão dos Dados Abertos da CVM e dos
+documentos do FundosNET, extração de texto dos regulamentos, busca combinando
+filtros estruturados e conteúdo, API e interface Next.js para a Vercel
+(ver [`web/`](web/README.md)), agendamento com alertas e export CSV.
 
 ## Ingestor (Python 3.11+)
 
@@ -137,8 +135,54 @@ pytest                                                    # SQLite
 TEST_DATABASE_URL=postgresql+psycopg://... pytest          # PostgreSQL
 ```
 
+## Agendamento e monitoramento (Fase 5)
+
+A ingestão roda no GitHub Actions (não na Vercel: funções serverless têm limite de
+tempo incompatível com scraping em lote):
+
+| Workflow | Agendamento | O que faz |
+|---|---|---|
+| **Ingestão CVM** | segundas, 07:00 BRT | CSVs da CVM (atualizados semanalmente) + métricas |
+| **Ingestão FNET** | diário, 06:00 BRT | domínios, metadados, download de regulamentos e extração de texto |
+
+Ambos aceitam disparo manual (`workflow_dispatch`) e, ao falhar, **abrem uma issue**
+com rótulo `ingestao` (comentando na existente, em vez de acumular duplicatas).
+
+### O diagnóstico
+
+```bash
+python -m ingestor status            # relatório legível
+python -m ingestor status --json     # mesmo conteúdo em JSON
+python -m ingestor status --check    # sai com código 1 se houver problema
+```
+
+`--check` é o último passo de cada workflow agendado. Ele existe por causa da
+falha mais traiçoeira: o job **passa sem erro nenhum, mas os dados param de
+avançar** — layout do portal mudou, cursor travou, credencial expirou. Por isso o
+diagnóstico não olha só o resultado da última execução; ele verifica o *frescor*:
+
+- última execução de cada fonte falhou, ficou velha demais (9 dias para a CVM,
+  3 para o FNET) ou nunca terminou;
+- a competência mais recente dos informes está atrasada mais de 4 meses;
+- avisos (não derrubam o status): documentos com erro de download, fila de OCR.
+
+Os limiares vêm de `MAX_DIAS_SEM_SYNC_CVM` e `MAX_DIAS_SEM_SYNC_FNET`.
+
+Cada execução fica registrada em `sync_runs` com status, estatísticas e erro — o
+registro sobrevive inclusive quando a exceção suja a transação. A aplicação web
+expõe o mesmo diagnóstico em `GET /api/health` (HTTP 503 quando há erro), pronto
+para um monitor de uptime externo.
+
 ## Execução no GitHub Actions
 
 O ambiente de desenvolvimento pode não ter acesso de rede aos portais da CVM/B3;
-a carga real roda pelo workflow **Ingestão CVM** (`workflow_dispatch`), que precisa
-do secret `DATABASE_URL`. O CI (`pytest`) roda em todo push.
+a carga real roda pelos workflows acima, que precisam do secret `DATABASE_URL`
+(e `STORAGE_URL` para persistir os PDFs). O CI roda a cada push: as duas suítes,
+contra SQLite e PostgreSQL.
+
+## Limitação conhecida: migrações de schema
+
+`init_db` usa `create_all`, que **cria tabelas novas mas não altera as existentes**.
+Colunas adicionadas a uma tabela que já existe em produção exigem `ALTER TABLE`
+manual. Quando o schema estabilizar, vale adotar Alembic; até lá, mudanças de
+coluna precisam de um passo manual antes do deploy.

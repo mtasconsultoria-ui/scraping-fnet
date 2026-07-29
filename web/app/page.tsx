@@ -136,6 +136,11 @@ export default async function Home({
   proximaPagina.set("offset", String(filtros.offset + filtros.limite));
   const paginaAnterior = new URLSearchParams(params);
   paginaAnterior.set("offset", String(Math.max(0, filtros.offset - filtros.limite)));
+  // o CSV leva o filtro inteiro, não só a página exibida
+  const exportacao = new URLSearchParams(params);
+  exportacao.set("formato", "csv");
+  exportacao.delete("offset");
+  exportacao.delete("limite");
 
   return (
     <main className="wrap">
@@ -255,6 +260,11 @@ export default async function Home({
               <strong>{resultado.exibidos}</strong> fundo(s)
               {filtros.offset > 0 && <> nesta página</>}
               {filtros.termos.length > 0 && <> para {filtros.termos.map((t) => `“${t}”`).join(" ou ")}</>}
+              {resultado.exibidos > 0 && (
+                <a className="export" href={`/api/fundos?${exportacao}`}>
+                  ↓ exportar CSV
+                </a>
+              )}
             </span>
             {/* o COUNT do SQL antecede a confirmação por regex e o descarte de
                 vedações, então é apresentado como aproximação, nunca como exato */}

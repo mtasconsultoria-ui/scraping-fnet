@@ -23,11 +23,28 @@ import re
 
 from .fnet_client import FnetClient, detect_ext
 from .http_client import fetch_bytes
-from .prospeccao import _CNPJ_RE, SITUACAO_ATIVA, carregar_cadastro, resolver_dominio
+from .parsing import CsvTable
+from .prospeccao import _CNPJ_RE, carregar_cadastro, esta_ativo, resolver_dominio
 from .text_extract import extrair
 from .textos import encontrar_trechos, fold
 
 log = logging.getLogger(__name__)
+
+# O TP_FUNDO do cad_fi pode trazer a sigla ou o nome por extenso, e isso já
+# mudou entre safras do arquivo; o filtro aceita qualquer uma das formas.
+SINONIMOS_TIPO = {
+    "fidc": ("fidc", "direitos creditorios"),
+    "fii": ("fii", "imobiliario"),
+    "fiagro": ("fiagro", "cadeias produtivas agroindustriais"),
+    "fip": ("fip", "participacoes"),
+}
+
+
+def _tipo_casa(tipo_pedido: str, tipo_cadastro: str | None) -> bool:
+    alvo = fold(tipo_pedido)
+    chaves = SINONIMOS_TIPO.get(alvo, (alvo,))
+    tipo_cad = fold(tipo_cadastro or "")
+    return any(chave in tipo_cad for chave in chaves)
 
 TERMOS_CONSULTORIA = ("consultoria especializada", "consultor especializado", "taxa de consultoria")
 _TERMOS_MONO = ("monocedente", "mono cedente", "cedente unico", "unico cedente", "um unico cedente")
@@ -159,6 +176,89 @@ def extrair_consultoria(texto: str, texto_norm: str) -> dict:
     }
 
 
+def _diagnostico_zero(cadastro: dict, administrador: str, tipo: str, fetch) -> None:
+    """Quando o filtro zera, mostra ONDE a expectativa divergiu do arquivo real.
+
+    Saída pensada para a próxima iteração do código: distribuição real de
+    (TP_FUNDO, SIT) dos fundos do administrador, onde mais o termo aparece, e
+    o conteúdo dos datasets de registro pós-CVM 175 — que podem ser a fonte
+    correta quando o cad_fi não traz mais o que procuramos.
+    """
+    from collections import Counter
+
+    alvo = fold(administrador)
+    print("=" * 78)
+    print("DIAGNÓSTICO — por que nenhum fundo casou")
+    print("=" * 78)
+
+    por_admin = [
+        (cnpj, info) for cnpj, info in cadastro.items()
+        if alvo in fold(info.get("administrador") or "")
+    ]
+    print(f"\n1) fundos cujo ADMIN contém {administrador!r}: {len(por_admin)}")
+    if por_admin:
+        combos = Counter(
+            (info.get("tipo"), info.get("situacao")) for _, info in por_admin
+        )
+        print("   distribuição (TP_FUNDO, SIT):")
+        for (tp, sit), n in combos.most_common(15):
+            print(f"     {n:5}  tipo={tp!r}  sit={sit!r}")
+        print("   exemplos:")
+        for cnpj, info in por_admin[:5]:
+            print(f"     {cnpj}  {(info.get('denominacao') or '')[:52]!r}")
+            print(f"        tipo={info.get('tipo')!r}  sit={info.get('situacao')!r}")
+    else:
+        aparicoes = [
+            (cnpj, info, campo)
+            for cnpj, info in cadastro.items()
+            for campo in ("gestor", "denominacao")
+            if alvo in fold(info.get(campo) or "")
+        ]
+        print(f"   ...mas o termo aparece em GESTOR/DENOMINAÇÃO de {len(aparicoes)} fundos:")
+        for cnpj, info, campo in aparicoes[:5]:
+            print(f"     {cnpj} [{campo}] {(info.get('denominacao') or '')[:46]!r}")
+            print(f"        admin={info.get('administrador')!r} tipo={info.get('tipo')!r}")
+
+    tipos = Counter(info.get("tipo") for info in cadastro.values())
+    print("\n2) TP_FUNDO mais comuns no cad_fi de hoje (o filtro de tipo compara com isto):")
+    for tp, n in tipos.most_common(15):
+        print(f"     {n:6}  {tp!r}")
+
+    print("\n3) datasets de registro pós-CVM 175 (possível fonte correta dos FIDCs):")
+    for nome in ("registro_fundo.csv", "registro_classe.csv", "registro_subclasse.csv"):
+        _sondar_registro(nome, alvo, fetch)
+
+
+def _sondar_registro(nome: str, alvo: str, fetch) -> None:
+    """Baixa um dataset de registro e mostra colunas + linhas com o termo."""
+    url = f"{cvm_base()}/FI/CAD/DADOS/{nome}"
+    try:
+        tabela = CsvTable(fetch(url), nome)
+    except Exception as exc:
+        print(f"   {nome}: indisponível ({exc})")
+        return
+    print(f"\n   {nome}: {len(tabela.rows):,} linhas")
+    print(f"   colunas: {sorted(tabela.columns)}")
+    indice_por_coluna = sorted(tabela.columns.items(), key=lambda kv: kv[1])
+    com_termo = [
+        linha for linha in tabela.rows
+        if any(alvo in fold(celula) for celula in linha)
+    ]
+    print(f"   linhas contendo o termo: {len(com_termo)}")
+    for linha in com_termo[:3]:
+        print("   exemplo:")
+        for coluna, indice in indice_por_coluna:
+            valor = linha[indice] if indice < len(linha) else ""
+            if valor.strip():
+                print(f"     {coluna:34} = {valor[:58]}")
+
+
+def cvm_base() -> str:
+    from .cvm_bulk import base_url
+
+    return base_url()
+
+
 def _regulamento_vigente(client: FnetClient, cnpj: str, id_categoria: int | None, id_tipo: int | None) -> dict | None:
     payload = client.search_documents(
         cnpj=cnpj,
@@ -186,17 +286,17 @@ def levantar_taxas(
 
     cadastro = carregar_cadastro(fetch)
     alvo_admin = fold(administrador)
-    alvo_tipo = fold(tipo)
     selecionados = {
         cnpj: info
         for cnpj, info in cadastro.items()
         if alvo_admin in fold(info.get("administrador") or "")
-        and alvo_tipo in fold(info.get("tipo") or "")
-        and (not apenas_ativos or info.get("situacao") == SITUACAO_ATIVA)
+        and _tipo_casa(tipo, info.get("tipo"))
+        and (not apenas_ativos or esta_ativo(info.get("situacao")))
     }
     print(f"fundos selecionados no cad_fi: {len(selecionados)}")
     if not selecionados:
-        print("nenhum fundo casa com os filtros — confira o nome do administrador")
+        print("nenhum fundo casa com os filtros — diagnóstico abaixo\n")
+        _diagnostico_zero(cadastro, administrador, tipo, fetch)
         return 1
     if len(selecionados) > max_fundos:
         print(f"AVISO: limitando aos primeiros {max_fundos} (de {len(selecionados)})")

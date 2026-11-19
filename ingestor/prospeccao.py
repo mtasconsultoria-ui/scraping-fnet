@@ -24,6 +24,16 @@ from .textos import encontrar_trechos, fold, termo_regex
 log = logging.getLogger(__name__)
 
 SITUACAO_ATIVA = "EM FUNCIONAMENTO NORMAL"
+
+
+def esta_ativo(situacao: str | None) -> bool:
+    """Fundo em operação, tolerante a variações de grafia da CVM.
+
+    O valor clássico é "EM FUNCIONAMENTO NORMAL"; o critério é a presença de
+    "funcionamento", o que exclui canceladas/encerradas/em liquidação sem
+    depender da string exata.
+    """
+    return "funcionamento" in fold(situacao or "")
 # âncoras de dígito: não casar o miolo de um protocolo/processo de 16+ dígitos
 _CNPJ_RE = re.compile(r"(?<!\d)\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}(?!\d)")
 
@@ -50,7 +60,7 @@ def carregar_cadastro(fetch=fetch_bytes) -> dict[str, dict]:
         situacao = cell(linha, idx["sit"])
         anterior = cadastro.get(cnpj)
         # entre registros do mesmo CNPJ, o ativo prevalece
-        if anterior and anterior.get("situacao") == SITUACAO_ATIVA:
+        if anterior and esta_ativo(anterior.get("situacao")):
             continue
         cadastro[cnpj] = {
             "denominacao": cell(linha, idx["denom"]),
@@ -212,7 +222,7 @@ class _Contexto:
             return False
         self.vistos.add(cnpj)
         info = self.cadastro.get(cnpj)
-        if self.apenas_ativos and info is not None and info.get("situacao") != SITUACAO_ATIVA:
+        if self.apenas_ativos and info is not None and not esta_ativo(info.get("situacao")):
             return False
         return True
 

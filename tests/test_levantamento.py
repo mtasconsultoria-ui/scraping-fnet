@@ -188,6 +188,57 @@ def test_levantamento_ponta_a_ponta(fake_levantamento, capsys, tmp_path):
     assert "nao contara com consultoria" in fold(multi["trecho"])
 
 
+def test_tipo_casa_sigla_e_por_extenso():
+    from ingestor.levantamento import _tipo_casa
+
+    assert _tipo_casa("FIDC", "FIDC")
+    assert _tipo_casa("FIDC", "FIDC-NP")
+    # o cad_fi já alternou entre sigla e nome por extenso entre safras
+    assert _tipo_casa("FIDC", "FUNDO DE INVESTIMENTO EM DIREITOS CREDITÓRIOS")
+    assert not _tipo_casa("FIDC", "FII")
+    assert not _tipo_casa("FIDC", None)
+
+
+def test_esta_ativo_tolerante():
+    from ingestor.prospeccao import esta_ativo
+
+    assert esta_ativo("EM FUNCIONAMENTO NORMAL")
+    assert esta_ativo("Em Funcionamento Normal")
+    assert esta_ativo("FUNCIONAMENTO NORMAL")
+    assert not esta_ativo("CANCELADA")
+    assert not esta_ativo("EM LIQUIDACAO")
+    assert not esta_ativo(None)
+
+
+def test_diagnostico_quando_zero(capsys):
+    """Com 0 selecionados, o comando explica o porquê em vez de só falhar."""
+    # ADMIN com o termo existe, mas tipo veio por extenso desconhecido e SIT nova
+    cad = """TP_FUNDO;CNPJ_FUNDO;DENOM_SOCIAL;DT_REG;SIT;PUBLICO_ALVO;ADMIN;GESTOR;CLASSE
+VEICULO NOVO;11.222.333/0001-81;ALGUM FIDC;2021-01-10;SITUACAO INUSITADA;Prof;LIMINE TRUST DTVM;G;
+""".encode("latin-1")
+    registro = """ID_REGISTRO_FUNDO;CNPJ_FUNDO;DENOMINACAO_SOCIAL;ADMINISTRADOR;SITUACAO
+1;11.222.333/0001-81;ALGUM FIDC;LIMINE TRUST DTVM;EM FUNCIONAMENTO NORMAL
+""".encode("latin-1")
+    codigo = levantar_taxas(
+        "LIMINE",
+        client=None,  # nunca chega ao FNET
+        fetch=FakeFetch({
+            "cad_fi.csv": cad,
+            "registro_fundo.csv": registro,
+            "registro_classe.csv": registro,
+            "registro_subclasse.csv": registro,
+        }),
+    )
+    saida = capsys.readouterr().out
+    assert codigo == 1
+    assert "DIAGNÓSTICO" in saida
+    assert "fundos cujo ADMIN contém 'LIMINE': 1" in saida
+    assert "tipo='VEICULO NOVO'" in saida and "sit='SITUACAO INUSITADA'" in saida
+    assert "registro_fundo.csv" in saida
+    assert "DENOMINACAO_SOCIAL" in saida  # colunas do dataset novo expostas
+    assert "linhas contendo o termo: 1" in saida
+
+
 @pytest.fixture()
 def fake_levantamento():
     return LevantamentoFake()

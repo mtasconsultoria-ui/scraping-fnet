@@ -294,3 +294,81 @@ FIDC;55.555.555/0001-15;VELHO FIDC;2015-01-10;CANCELADA;Prof;LIMINE TRUST DTVM;G
 @pytest.fixture()
 def fake_levantamento():
     return LevantamentoFake()
+
+
+# --- achados do levantamento real (2026-11-19): padrão LIMINE ------------------
+
+CLAUSULA_PADRAO_LIMINE = normalize_nfc(
+    "(c) Taxa Maxima de Custodia. Pelos servicos a serem desempenhados pelo "
+    "Custodiante, sera devida pela Classe Unica uma taxa maxima de custodia "
+    "equivalente a 0,15% a.a. (quinze centesimos por cento ao ano), incidente "
+    "sobre o Patrimonio Liquido do Fundo, assegurado o pagamento minimo mensal "
+    "de R$ 10.000,00 (dez mil reais), corrigido anualmente pela variacao "
+    "positiva do IGPM/FGV; (d) Remuneracao da Consultora Especializada. Pelos "
+    "servicos a serem desempenhados pelo Consultor Especializado, sera devida "
+    "pela Classe Unica: (i) uma remuneracao mensal fixa equivalente a "
+    "R$ 12.500,00 (doze mil e quinhentos reais); e (ii) uma remuneracao "
+    "variavel, a ser apurada mensalmente, a qual podera sofrer acrescimos em "
+    "razao da complexidade operacional da carteira; (e) Taxa de Controladoria. "
+    "Pelos servicos de controladoria sera devida taxa de 0,05% a.a., com "
+    "minimo mensal de R$ 2.000,00."
+)
+
+
+def test_clausula_padrao_limine_nao_vaza_custodia():
+    """Reprodução do erro real: o mínimo da CUSTÓDIA (item anterior) saía
+    atribuído à consultoria. A cláusula é delimitada e só o que está nela conta."""
+    resultado = extrair_consultoria(CLAUSULA_PADRAO_LIMINE, fold(CLAUSULA_PADRAO_LIMINE))
+    assert resultado["presente"] is True
+    # nada da custódia (0,15% / 10.000) nem da controladoria (0,05% / 2.000)
+    assert resultado["pct_aa"] == []
+    assert resultado["minimos_mensais"] == []
+    # a remuneração da LIMINE: mensal FIXA + parcela variável sinalizada
+    assert resultado["fixos_mensais"] == ["12.500,00"]
+    assert resultado["tem_variavel"] is True
+
+
+def test_termo_consultora_feminino_detectado():
+    texto = normalize_nfc("Remuneracao da Consultora Especializada: R$ 5.000,00 fixos mensais.")
+    resultado = extrair_consultoria(texto, fold(texto))
+    assert resultado["presente"] is True
+    assert resultado["fixos_mensais"] == ["5.000,00"]
+
+
+def test_pct_da_propria_clausula_continua_capturado():
+    texto = normalize_nfc(
+        "A consultoria especializada fara jus a 0,35% (trinta e cinco centesimos "
+        "por cento) ao ano, com minimo mensal de R$ 15.000,00; Taxa de "
+        "Administracao: 0,20% a.a., minimo mensal de R$ 8.000,00."
+    )
+    resultado = extrair_consultoria(texto, fold(texto))
+    assert resultado["pct_aa"] == ["0,35"]          # o 0,20 da administração ficou fora
+    assert resultado["minimos_mensais"] == ["15.000,00"]  # o 8.000 também
+
+
+def test_levantamento_por_lista_de_cnpjs(fake_levantamento, capsys, tmp_path):
+    """--cnpjs analisa exatamente a lista, sem refiltrar por admin/tipo/situação."""
+    csv_path = tmp_path / "saida.csv"
+    codigo = levantar_taxas(
+        "LIMINE",
+        cnpjs=["11.222.333/0001-81"],  # formatado, como o usuário cola
+        saida_csv=str(csv_path),
+        client=fake_levantamento.client(),
+        fetch=FakeFetch({
+            "cad_fi.csv": CAD_FI,
+            "registro_fundo_classe.zip": REGISTRO_ZIP,
+        }),
+    )
+    assert codigo == 0
+    saida = capsys.readouterr().out
+    assert "fundos da lista informada: 1" in saida
+
+    import csv as csv_mod
+
+    with open(csv_path, encoding="utf-8-sig") as fh:
+        linhas = list(csv_mod.DictReader(fh, delimiter=";"))
+    assert [l["cnpj"] for l in linhas] == [CNPJ_MONO]
+    # o VAREJO AMPLO (ativo, LIMINE) ficou de fora: a lista manda
+    buscas = [r.url.params.get("cnpjFundo") for r in fake_levantamento.requests
+              if "pesquisar" in r.url.path]
+    assert CNPJ_MULTI not in buscas

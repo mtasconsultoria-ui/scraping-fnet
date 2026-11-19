@@ -157,7 +157,12 @@ def carregar_universo(fetch=fetch_bytes) -> tuple[dict[str, dict], bool]:
         universo[cnpj] = info
     return universo, True
 
-TERMOS_CONSULTORIA = ("consultoria especializada", "consultor especializado", "taxa de consultoria")
+TERMOS_CONSULTORIA = (
+    "consultoria especializada",
+    "consultor especializado",
+    "consultora especializada",  # "Remuneração da Consultora Especializada" (padrão LIMINE)
+    "taxa de consultoria",
+)
 _TERMOS_MONO = ("monocedente", "mono cedente", "cedente unico", "unico cedente", "um unico cedente")
 _TERMOS_MULTI = ("multicedente", "multi cedente", "multiplos cedentes", "diversos cedentes")
 
@@ -178,10 +183,34 @@ _PCT_RE = re.compile(r"(?<![\d,.])(\d{1,2}(?:[.,]\d{1,4})?)\s*%")
 # "0,35% (trinta e cinco centésimos por cento) ao ano": o extenso fica no meio
 _ANUAL_RE = re.compile(r"^\s*(?:\([^)]{0,160}\))?\s*(?:a\s*\.?\s*a\b|ao\s+ano)")
 _VALOR_RE = re.compile(r"r\$\s*([\d.]{1,14}(?:,\d{2})?)")
+_MENSAL_RE = re.compile(r"\bmensal|\bmensais|\bpor mes\b|\bao mes\b")
+_FIXO_RE = re.compile(r"\bfix[ao]s?\b")
+_VARIAVEL_RE = re.compile(r"(?:remuneracao|parcela|componente)\s+variavel")
 
-JANELA_ANTES = 250
+# Os regulamentos listam as taxas em itens consecutivos: "(c) Taxa Máxima de
+# Custódia ... (d) Remuneração da Consultora Especializada ... (e) ...". A
+# cláusula da consultoria TERMINA quando começa o título de outra taxa — sem o
+# corte, os valores do item vizinho contaminam a captura (constatado em
+# produção: o mínimo mensal da CUSTÓDIA saiu atribuído à consultoria).
+_FIM_CLAUSULA_RE = re.compile(
+    r"taxa\s+(?:maxima\s+)?de\s+(?:custodia|administracao|gestao|controladoria|"
+    r"escrituracao|performance|distribuicao|fiscalizacao|ingresso|saida)"
+    r"|remuneracao\s+d[oa]\s+(?:administrador|gestor|gestora|custodiante|controlador|"
+    r"escriturador|distribuidor|agente)"
+    r"|\bdespesas\s+do\s+fundo|\bencargos\s+do\s+fundo"
+)
+
+# Só se capturam valores DEPOIS do termo: o que vem antes pertence à cláusula
+# anterior (a da custódia, tipicamente). Janela de exibição mantém contexto.
 JANELA_DEPOIS = 900
 JANELA_DEFINICAO = 450
+
+
+def _janela_clausula(texto_norm: str, fim_termo: int) -> str:
+    """Trecho do fim do termo até o começo da próxima cláusula de taxa."""
+    bruto = texto_norm[fim_termo:fim_termo + JANELA_DEPOIS]
+    corte = _FIM_CLAUSULA_RE.search(bruto, 10)
+    return bruto[:corte.start()] if corte else bruto
 
 
 def _definicoes_cedente(texto: str, texto_norm: str) -> list[tuple[str, str]]:
@@ -241,19 +270,29 @@ def classificar_cedencia(texto: str, texto_norm: str) -> dict:
 
 
 def extrair_consultoria(texto: str, texto_norm: str) -> dict:
-    """Percentuais a.a. e mínimos mensais na vizinhança dos termos de consultoria."""
+    """Valores da cláusula de consultoria, na janela delimitada da cláusula.
+
+    Captura três formas de remuneração observadas nos regulamentos:
+    percentual ao ano, valor mínimo mensal, e remuneração MENSAL FIXA em R$
+    (padrão dos regulamentos da LIMINE: "remuneração mensal fixa equivalente a
+    R$ 12.500,00, e uma remuneração variável..."). A parcela variável vira um
+    sinalizador — ela não tem número no regulamento.
+    """
     pct_aa: list[str] = []
     pct_sem_periodo: list[str] = []
     minimos_mensais: list[str] = []
+    fixos_mensais: list[str] = []
     outros_valores: list[str] = []
+    tem_variavel = False
     presente = False
 
     for termo in TERMOS_CONSULTORIA:
         for ocorrencia in re.finditer(re.escape(termo), texto_norm):
             presente = True
-            inicio = max(0, ocorrencia.start() - JANELA_ANTES)
-            fim = min(len(texto_norm), ocorrencia.end() + JANELA_DEPOIS)
-            janela = texto_norm[inicio:fim]
+            janela = _janela_clausula(texto_norm, ocorrencia.end())
+
+            if _VARIAVEL_RE.search(janela):
+                tem_variavel = True
 
             for m in _PCT_RE.finditer(janela):
                 pct = m.group(1)
@@ -263,14 +302,16 @@ def extrair_consultoria(texto: str, texto_norm: str) -> dict:
 
             for m in _VALOR_RE.finditer(janela):
                 contexto_valor = janela[max(0, m.start() - 110):m.end() + 110]
-                eh_minimo = "minimo" in contexto_valor or "minima" in contexto_valor
-                eh_mensal = re.search(r"\bmensal|\bmensais|\bpor mes\b|\bao mes\b", contexto_valor)
+                eh_mensal = _MENSAL_RE.search(contexto_valor)
                 valor = m.group(1)
-                if eh_minimo and eh_mensal:
-                    if valor not in minimos_mensais:
-                        minimos_mensais.append(valor)
-                elif valor not in outros_valores:
-                    outros_valores.append(valor)
+                if ("minimo" in contexto_valor or "minima" in contexto_valor) and eh_mensal:
+                    destino = minimos_mensais
+                elif _FIXO_RE.search(contexto_valor) and eh_mensal:
+                    destino = fixos_mensais
+                else:
+                    destino = outros_valores
+                if valor not in destino:
+                    destino.append(valor)
 
     trechos = (
         encontrar_trechos(texto, texto_norm, list(TERMOS_CONSULTORIA), max_trechos=2, contexto=420)
@@ -282,6 +323,8 @@ def extrair_consultoria(texto: str, texto_norm: str) -> dict:
         "pct_aa": pct_aa,
         "pct_sem_periodo": pct_sem_periodo,
         "minimos_mensais": minimos_mensais,
+        "fixos_mensais": fixos_mensais,
+        "tem_variavel": tem_variavel,
         "outros_valores": outros_valores,
         "trechos": [t.texto for t in trechos],
     }
@@ -360,6 +403,7 @@ def levantar_taxas(
     administrador: str,
     *,
     tipo: str = "FIDC",
+    cnpjs: list[str] | None = None,
     max_fundos: int = 400,
     apenas_ativos: bool = True,
     saida_csv: str | None = None,
@@ -370,19 +414,29 @@ def levantar_taxas(
     print(f"tipo de fundo: {tipo} | somente ativos: {apenas_ativos}\n")
 
     universo, registro_ok = carregar_universo(fetch)
-    alvo_admin = fold(administrador)
-    selecionados = {
-        cnpj: info
-        for cnpj, info in universo.items()
-        if alvo_admin in fold(info.get("administrador") or "")
-        and _tipo_casa(tipo, info.get("tipo"))
-        and (not apenas_ativos or esta_ativo(info.get("situacao")))
-    }
-    print(f"fundos selecionados (registro + cad_fi): {len(selecionados)}")
-    if not selecionados:
-        print("nenhum fundo casa com os filtros — diagnóstico abaixo\n")
-        _diagnostico_zero(universo, administrador, tipo, registro_ok)
-        return 1
+    if cnpjs:
+        # lista explícita (ex.: só os monocedentes da rodada anterior): analisa
+        # exatamente esses, sem refiltrar por administrador/tipo/situação
+        pedidos = [norm_cnpj(c) for c in cnpjs]
+        selecionados = {c: universo.get(c, {}) for c in pedidos if c}
+        print(f"fundos da lista informada: {len(selecionados)}")
+        for c, info in selecionados.items():
+            if not info:
+                log.warning("%s não consta nos cadastros CVM; segue só pelo FNET", c)
+    else:
+        alvo_admin = fold(administrador)
+        selecionados = {
+            cnpj: info
+            for cnpj, info in universo.items()
+            if alvo_admin in fold(info.get("administrador") or "")
+            and _tipo_casa(tipo, info.get("tipo"))
+            and (not apenas_ativos or esta_ativo(info.get("situacao")))
+        }
+        print(f"fundos selecionados (registro + cad_fi): {len(selecionados)}")
+        if not selecionados:
+            print("nenhum fundo casa com os filtros — diagnóstico abaixo\n")
+            _diagnostico_zero(universo, administrador, tipo, registro_ok)
+            return 1
     if len(selecionados) > max_fundos:
         print(f"AVISO: limitando aos primeiros {max_fundos} (de {len(selecionados)})")
         selecionados = dict(list(selecionados.items())[:max_fundos])
@@ -410,6 +464,8 @@ def levantar_taxas(
                 "taxa_consultoria_pct_aa": "",
                 "pct_sem_periodo": "",
                 "minimo_mensal_rs": "",
+                "fixo_mensal_rs": "",
+                "parcela_variavel": "",
                 "outros_valores_rs": "",
                 "doc_id": "",
                 "url_fnet": "",
@@ -463,6 +519,8 @@ def levantar_taxas(
                 linha["taxa_consultoria_pct_aa"] = " | ".join(consultoria["pct_aa"])
                 linha["pct_sem_periodo"] = " | ".join(consultoria["pct_sem_periodo"])
                 linha["minimo_mensal_rs"] = " | ".join(consultoria["minimos_mensais"])
+                linha["fixo_mensal_rs"] = " | ".join(consultoria["fixos_mensais"])
+                linha["parcela_variavel"] = "sim" if consultoria["tem_variavel"] else ""
                 linha["outros_valores_rs"] = " | ".join(consultoria["outros_valores"][:6])
                 linha["trecho"] = " ||| ".join(consultoria["trechos"])
                 log.info(
@@ -470,7 +528,7 @@ def levantar_taxas(
                     n, len(selecionados), cnpj, (info.get("denominacao") or "")[:45],
                     cedencia["classificacao"], linha["consultoria_presente"],
                     linha["taxa_consultoria_pct_aa"] or "-",
-                    linha["minimo_mensal_rs"] or "-",
+                    linha["minimo_mensal_rs"] or linha["fixo_mensal_rs"] or "-",
                 )
             except Exception as exc:
                 linha["obs"] = f"{type(exc).__name__}: {exc}"[:200]
@@ -499,16 +557,17 @@ def _resumir(linhas: list[dict]) -> None:
     print(f"\n{'=' * 98}")
     print(f"RESUMO — {len(linhas)} fundos examinados | {len(com_consultoria)} com cláusula de consultoria")
     print(f"{'=' * 98}")
-    print(f"{'CNPJ':16} {'cedência':14} {'% a.a.':14} {'mín. mensal R$':18} denominação")
+    print(f"{'CNPJ':16} {'cedência':14} {'% a.a.':12} {'fixo mensal R$':16} {'mín. mensal R$':16} denominação")
     print("-" * 98)
     for linha in linhas:
         if linha["consultoria_presente"] != "sim":
             continue
         print(
             f"{linha['cnpj']:16} {linha['cedencia']:14} "
-            f"{(linha['taxa_consultoria_pct_aa'] or '-'):14} "
-            f"{(linha['minimo_mensal_rs'] or '-'):18} "
-            f"{(linha['denominacao'] or '')[:44]}"
+            f"{(linha['taxa_consultoria_pct_aa'] or '-'):12} "
+            f"{(linha['fixo_mensal_rs'] or '-'):16} "
+            f"{(linha['minimo_mensal_rs'] or '-'):16} "
+            f"{(linha['denominacao'] or '')[:40]}"
         )
     sem_texto = sum(1 for l in linhas if "OCR" in l["obs"])
     sem_reg = sum(1 for l in linhas if "nenhum regulamento" in l["obs"])

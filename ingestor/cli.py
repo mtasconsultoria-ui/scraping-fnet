@@ -123,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
     p_taxas.add_argument("--administrador", required=True, help="trecho do nome no cad_fi (ex.: LIMINE)")
     p_taxas.add_argument("--tipo", default="FIDC", help="tipo de fundo (TP_FUNDO do cad_fi e filtro FNET)")
     p_taxas.add_argument("--max-fundos", type=int, default=400)
+    p_taxas.add_argument(
+        "--cnpjs", nargs="+",
+        help="analisa só esta lista de CNPJs (com ou sem pontuação), ignorando os filtros",
+    )
     p_taxas.add_argument("--csv", help="caminho do CSV de saída")
 
     p_status = sub.add_parser("status", help="diagnóstico de saúde da ingestão")
@@ -153,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         return levantamento.levantar_taxas(
             args.administrador,
             tipo=args.tipo,
+            cnpjs=args.cnpjs,
             max_fundos=args.max_fundos,
             saida_csv=args.csv,
         )

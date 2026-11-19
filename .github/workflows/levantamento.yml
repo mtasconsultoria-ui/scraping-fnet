@@ -17,6 +17,9 @@ on:
       max_fundos:
         description: "teto de fundos a examinar"
         default: "400"
+      cnpjs:
+        description: "lista de CNPJs separados por vírgula/espaço (se preenchida, ignora os filtros acima)"
+        default: ""
 
 permissions:
   contents: read
@@ -35,11 +38,21 @@ jobs:
       - name: Levantamento
         run: |
           mkdir -p saida
-          python -m ingestor levantar-taxas \
-            --administrador "${{ inputs.administrador }}" \
-            --tipo "${{ inputs.tipo_fundo }}" \
-            --max-fundos "${{ inputs.max_fundos }}" \
-            --csv saida/levantamento.csv
+          CNPJS="$(echo "${{ inputs.cnpjs }}" | tr ',;\n' '   ')"
+          if [ -n "$(echo $CNPJS | tr -d ' ')" ]; then
+            python -m ingestor levantar-taxas \
+              --administrador "${{ inputs.administrador }}" \
+              --tipo "${{ inputs.tipo_fundo }}" \
+              --max-fundos "${{ inputs.max_fundos }}" \
+              --cnpjs $CNPJS \
+              --csv saida/levantamento.csv
+          else
+            python -m ingestor levantar-taxas \
+              --administrador "${{ inputs.administrador }}" \
+              --tipo "${{ inputs.tipo_fundo }}" \
+              --max-fundos "${{ inputs.max_fundos }}" \
+              --csv saida/levantamento.csv
+          fi
 
       - name: Publicar CSV
         if: always()

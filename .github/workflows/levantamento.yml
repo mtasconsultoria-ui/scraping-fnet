@@ -61,3 +61,15 @@ jobs:
           name: levantamento-taxas
           path: saida/levantamento.csv
           if-no-files-found: ignore
+
+      # O CSV também vai no log em base64: o ambiente que analisa os resultados
+      # alcança a API de logs do GitHub, mas não o blob storage dos artifacts.
+      - name: Exibir CSV no log (base64)
+        if: always()
+        run: |
+          if [ -f saida/levantamento.csv ]; then
+            echo "===CSV_BASE64_INICIO==="
+            base64 -w0 saida/levantamento.csv
+            echo
+            echo "===CSV_BASE64_FIM==="
+          fi

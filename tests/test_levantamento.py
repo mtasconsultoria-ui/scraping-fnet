@@ -6,7 +6,7 @@ Cedentes: nominada com CNPJ (estrutura monocedente) e genérica (multicedente).
 import httpx
 import pytest
 
-from conftest import FakeFetch
+from conftest import FakeFetch, make_zip
 from ingestor.fnet_client import FnetClient
 from ingestor.levantamento import classificar_cedencia, extrair_consultoria, levantar_taxas
 from ingestor.textos import fold, normalize_nfc
@@ -15,13 +15,29 @@ from ingestor.textos import fold, normalize_nfc
 CNPJ_MONO = "11222333000181"
 CNPJ_MULTI = "11444777000161"
 
+# Realidade constatada em produção: o cad_fi legado só tem os fundos MORTOS do
+# administrador; os vivos estão no Registro de Fundos (CVM 175).
 CAD_FI = """TP_FUNDO;CNPJ_FUNDO;DENOM_SOCIAL;DT_REG;SIT;PUBLICO_ALVO;ADMIN;GESTOR;CLASSE
-FIDC;11.222.333/0001-81;AGRO FORTE FIDC;2021-01-10;EM FUNCIONAMENTO NORMAL;Investidores Profissionais;LIMINE TRUST DTVM LTDA;GESTORA A;FIDC
-FIDC;11.444.777/0001-61;VAREJO AMPLO FIDC;2020-02-20;EM FUNCIONAMENTO NORMAL;Investidores Qualificados;LIMINE TRUST DTVM LTDA;GESTORA B;FIDC
 FIDC;55.555.555/0001-15;ENCERRADO FIDC;2015-03-30;CANCELADA;Investidores Qualificados;LIMINE TRUST DTVM LTDA;GESTORA C;FIDC
-FIDC;22.222.222/0001-72;OUTRO ADMIN FIDC;2019-04-04;EM FUNCIONAMENTO NORMAL;Investidores Qualificados;BANCO QUALQUER S.A.;GESTORA D;FIDC
 FII;33.333.333/0001-53;LIMINE SHOPPING FII;2018-05-05;EM FUNCIONAMENTO NORMAL;Investidores em Geral;LIMINE TRUST DTVM LTDA;GESTORA E;
 """.encode("latin-1")
+
+REGISTRO_FUNDO = """ID_Registro_Fundo;CNPJ_Fundo;Tipo_Fundo;Denominacao_Social;Situacao;Administrador;Gestor
+10;11.222.333/0001-81;FIDC;AGRO FORTE FIDC;EM FUNCIONAMENTO NORMAL;LIMINE TRUST DTVM LTDA;GESTORA A
+20;11.444.777/0001-61;FIDC;VAREJO AMPLO FIDC;EM FUNCIONAMENTO NORMAL;LIMINE TRUST DTVM LTDA;GESTORA B
+30;22.222.222/0001-72;FIDC;OUTRO ADMIN FIDC;EM FUNCIONAMENTO NORMAL;BANCO QUALQUER S.A.;GESTORA D
+40;44.444.444/0001-34;FII;LIMINE PREDIOS FII;EM FUNCIONAMENTO NORMAL;LIMINE TRUST DTVM LTDA;GESTORA E
+""".encode("latin-1")
+
+REGISTRO_CLASSE = """ID_Registro_Fundo;ID_Registro_Classe;CNPJ_Classe;Denominacao_Social;Publico_Alvo
+10;101;11.999.888/0001-55;AGRO FORTE CLASSE UNICA;Investidores Profissionais
+20;201;;VAREJO AMPLO SENIOR;Investidores Qualificados
+20;202;;VAREJO AMPLO SUB;Investidores Profissionais
+""".encode("latin-1")
+
+REGISTRO_ZIP = make_zip(
+    {"registro_fundo.csv": REGISTRO_FUNDO, "registro_classe.csv": REGISTRO_CLASSE}
+)
 
 FILTER_PAGE = """
 <select id="tipoFundo">
@@ -153,13 +169,17 @@ def test_levantamento_ponta_a_ponta(fake_levantamento, capsys, tmp_path):
         "LIMINE",
         saida_csv=str(csv_path),
         client=fake_levantamento.client(),
-        fetch=FakeFetch({"cad_fi.csv": CAD_FI}),
+        fetch=FakeFetch({
+            "cad_fi.csv": CAD_FI,
+            "registro_fundo_classe.zip": REGISTRO_ZIP,
+        }),
     )
     assert codigo == 0
     saida = capsys.readouterr().out
 
-    # só os 2 FIDCs ATIVOS da LIMINE: cancelado, outro admin e FII ficam fora
-    assert "fundos selecionados no cad_fi: 2" in saida
+    # só os 2 FIDCs ATIVOS da LIMINE, vindos do REGISTRO: o cancelado do
+    # cad_fi, o FII e o FIDC de outro administrador ficam fora
+    assert "fundos selecionados (registro + cad_fi): 2" in saida
     buscas = [r.url.params.get("cnpjFundo") for r in fake_levantamento.requests
               if "pesquisar" in r.url.path]
     assert "55555555000115" not in buscas  # cancelado nunca foi consultado
@@ -171,6 +191,8 @@ def test_levantamento_ponta_a_ponta(fake_levantamento, capsys, tmp_path):
     assert set(linhas) == {CNPJ_MONO, CNPJ_MULTI}
 
     mono = linhas[CNPJ_MONO]
+    assert mono["fonte_cadastro"] == "registro"
+    assert mono["publico_alvo"] == "Investidores Profissionais"  # veio da classe
     assert mono["cedencia"] == "monocedente"
     assert mono["cedencia_fonte"] == "definicao de Cedente(s)"
     assert "44.555.666/0001-77" in mono["definicao_cedente"]
@@ -181,11 +203,44 @@ def test_levantamento_ponta_a_ponta(fake_levantamento, capsys, tmp_path):
 
     multi = linhas[CNPJ_MULTI]
     assert multi["cedencia"] == "multicedente"
+    assert "Qualificados | Investidores Profissionais" in multi["publico_alvo"]
     # menciona o termo, mas para dizer que NÃO contará com consultoria;
     # o trecho no CSV é o que permite ao analista ver isso
     assert multi["consultoria_presente"] == "sim"
     assert multi["taxa_consultoria_pct_aa"] == ""
     assert "nao contara com consultoria" in fold(multi["trecho"])
+
+
+def test_levantamento_usa_url_de_contingencia(fake_levantamento, capsys):
+    """Se o zip principal der 404, a variante com underscore é tentada."""
+    codigo = levantar_taxas(
+        "LIMINE",
+        client=fake_levantamento.client(),
+        fetch=FakeFetch({
+            "cad_fi.csv": CAD_FI,
+            "registro_fundo_classe.zip": RuntimeError("404"),
+            "registro_fundo_classe_.zip": REGISTRO_ZIP,
+        }),
+    )
+    assert codigo == 0
+    assert "fundos selecionados (registro + cad_fi): 2" in capsys.readouterr().out
+
+
+def test_levantamento_sem_registro_cai_no_diagnostico(fake_levantamento, capsys):
+    """Sem o registro, só o legado existe — e o diagnóstico avisa isso."""
+    codigo = levantar_taxas(
+        "LIMINE",
+        client=fake_levantamento.client(),
+        fetch=FakeFetch({
+            "cad_fi.csv": CAD_FI,
+            "registro_fundo_classe.zip": RuntimeError("fora do ar"),
+            "registro_fundo_classe_.zip": RuntimeError("fora do ar"),
+        }),
+    )
+    saida = capsys.readouterr().out
+    assert codigo == 1  # só há LIMINE cancelada/FII no legado
+    assert "INDISPONÍVEL" in saida
+    assert "[cad_fi] tipo='FIDC'  sit='CANCELADA'" in saida
 
 
 def test_tipo_casa_sigla_e_por_extenso():
@@ -212,31 +267,28 @@ def test_esta_ativo_tolerante():
 
 def test_diagnostico_quando_zero(capsys):
     """Com 0 selecionados, o comando explica o porquê em vez de só falhar."""
-    # ADMIN com o termo existe, mas tipo veio por extenso desconhecido e SIT nova
+    # LIMINE existe no registro, mas em situação que não é de funcionamento
+    registro = make_zip({
+        "registro_fundo.csv": (
+            "ID_Registro_Fundo;CNPJ_Fundo;Tipo_Fundo;Denominacao_Social;Situacao;Administrador;Gestor\n"
+            "10;11.222.333/0001-81;FIDC;ALGUM FIDC;PRE-OPERACIONAL;LIMINE TRUST DTVM;G\n"
+        ).encode("latin-1"),
+    })
     cad = """TP_FUNDO;CNPJ_FUNDO;DENOM_SOCIAL;DT_REG;SIT;PUBLICO_ALVO;ADMIN;GESTOR;CLASSE
-VEICULO NOVO;11.222.333/0001-81;ALGUM FIDC;2021-01-10;SITUACAO INUSITADA;Prof;LIMINE TRUST DTVM;G;
-""".encode("latin-1")
-    registro = """ID_REGISTRO_FUNDO;CNPJ_FUNDO;DENOMINACAO_SOCIAL;ADMINISTRADOR;SITUACAO
-1;11.222.333/0001-81;ALGUM FIDC;LIMINE TRUST DTVM;EM FUNCIONAMENTO NORMAL
+FIDC;55.555.555/0001-15;VELHO FIDC;2015-01-10;CANCELADA;Prof;LIMINE TRUST DTVM;G;
 """.encode("latin-1")
     codigo = levantar_taxas(
         "LIMINE",
         client=None,  # nunca chega ao FNET
-        fetch=FakeFetch({
-            "cad_fi.csv": cad,
-            "registro_fundo.csv": registro,
-            "registro_classe.csv": registro,
-            "registro_subclasse.csv": registro,
-        }),
+        fetch=FakeFetch({"cad_fi.csv": cad, "registro_fundo_classe.zip": registro}),
     )
     saida = capsys.readouterr().out
     assert codigo == 1
     assert "DIAGNÓSTICO" in saida
-    assert "fundos cujo ADMIN contém 'LIMINE': 1" in saida
-    assert "tipo='VEICULO NOVO'" in saida and "sit='SITUACAO INUSITADA'" in saida
-    assert "registro_fundo.csv" in saida
-    assert "DENOMINACAO_SOCIAL" in saida  # colunas do dataset novo expostas
-    assert "linhas contendo o termo: 1" in saida
+    assert "carregado e fundido" in saida
+    assert "fundos cujo ADMIN contém 'LIMINE': 2" in saida
+    assert "[registro] tipo='FIDC'  sit='PRE-OPERACIONAL'" in saida
+    assert "[cad_fi] tipo='FIDC'  sit='CANCELADA'" in saida
 
 
 @pytest.fixture()

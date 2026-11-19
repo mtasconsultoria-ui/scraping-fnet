@@ -38,9 +38,12 @@ def make_zip(files: dict[str, bytes]) -> bytes:
 
 
 class FakeFetch:
-    """fetch(url) servindo bytes pré-definidos por trecho da URL."""
+    """fetch(url) servindo bytes pré-definidos por trecho da URL.
 
-    def __init__(self, responses: dict[str, bytes]):
+    Um valor Exception simula falha de download daquele recurso (404 etc.).
+    """
+
+    def __init__(self, responses: dict[str, bytes | Exception]):
         self.responses = responses
         self.calls: list[str] = []
 
@@ -48,5 +51,7 @@ class FakeFetch:
         self.calls.append(url)
         for token, data in self.responses.items():
             if token in url:
+                if isinstance(data, Exception):
+                    raise data
                 return data
         raise AssertionError(f"URL inesperada no teste: {url}")

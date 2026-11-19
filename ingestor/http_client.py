@@ -29,6 +29,10 @@ def fetch_bytes(url: str) -> bytes:
             )
             response.raise_for_status()
             return response.content
-        except httpx.HTTPError as exc:  # inclui timeouts e 5xx
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500:
+                raise  # 4xx não é transitório: insistir só atrasa o diagnóstico
+            last_error = exc
+        except httpx.HTTPError as exc:  # timeouts, 5xx e erros de transporte
             last_error = exc
     raise RuntimeError(f"download falhou após {RETRIES} tentativas: {url}") from last_error

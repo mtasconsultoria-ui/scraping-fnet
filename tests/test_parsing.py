@@ -76,3 +76,23 @@ def test_csv_table_utf8_bom():
     data = "﻿CNPJ_FUNDO;SIT\n123;ATIVO\n".encode("utf-8")
     table = CsvTable(data, "x.csv")
     assert table.index_of("CNPJ_FUNDO") == 0
+
+
+def test_fetch_bytes_nao_repete_em_404(monkeypatch):
+    """O retry é para instabilidade; um 404 definitivo falha na primeira."""
+    import httpx
+
+    from ingestor import http_client
+
+    chamadas = []
+
+    def fake_get(url, **kwargs):
+        chamadas.append(url)
+        return httpx.Response(404, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(http_client.httpx, "get", fake_get)
+    import pytest as _pytest
+
+    with _pytest.raises(httpx.HTTPStatusError):
+        http_client.fetch_bytes("https://exemplo.test/nao-existe.csv")
+    assert len(chamadas) == 1

@@ -20,10 +20,11 @@ import datetime as dt
 import io
 import logging
 import re
+import zipfile
 
 from .fnet_client import FnetClient, detect_ext
 from .http_client import fetch_bytes
-from .parsing import CsvTable
+from .parsing import CsvTable, cell, norm_cnpj
 from .prospeccao import _CNPJ_RE, carregar_cadastro, esta_ativo, resolver_dominio
 from .text_extract import extrair
 from .textos import encontrar_trechos, fold
@@ -45,6 +46,116 @@ def _tipo_casa(tipo_pedido: str, tipo_cadastro: str | None) -> bool:
     chaves = SINONIMOS_TIPO.get(alvo, (alvo,))
     tipo_cad = fold(tipo_cadastro or "")
     return any(chave in tipo_cad for chave in chaves)
+
+
+# O cad_fi.csv virou o cadastro LEGADO (constatado em produção: os fundos da
+# administradora pesquisada apareciam lá só como cancelados). Os fundos vivos,
+# pós-CVM 175, estão no Registro de Fundos — um zip com registro_fundo.csv,
+# registro_classe.csv e registro_subclasse.csv. A URL com underscore final é a
+# contingência que o portal já usou; tenta-se as duas.
+ARQUIVOS_REGISTRO = ("registro_fundo_classe.zip", "registro_fundo_classe_.zip")
+
+
+def carregar_registro(fetch=fetch_bytes) -> dict[str, dict]:
+    """CNPJ -> dados do Registro de Fundos (CVM 175), com público-alvo das classes."""
+    data = None
+    ultimo_erro: Exception | None = None
+    for nome in ARQUIVOS_REGISTRO:
+        url = f"{cvm_base()}/FI/CAD/DADOS/{nome}"
+        try:
+            data = fetch(url)
+            log.info("registro de fundos carregado de %s", nome)
+            break
+        except Exception as exc:
+            ultimo_erro = exc
+    if data is None:
+        raise RuntimeError(f"registro_fundo_classe indisponível: {ultimo_erro}")
+
+    archive = zipfile.ZipFile(io.BytesIO(data))
+    nomes = {n.rsplit("/", 1)[-1].lower(): n for n in archive.namelist()}
+    nome_fundos = next((n for b, n in nomes.items() if b.startswith("registro_fundo")), None)
+    if nome_fundos is None:
+        raise RuntimeError(f"zip do registro sem registro_fundo.csv: {archive.namelist()}")
+
+    tabela = CsvTable(archive.read(nome_fundos), nome_fundos)
+    idx = {
+        "cnpj": tabela.require("CNPJ_FUNDO", "CNPJ_FUNDO_CLASSE"),
+        "id": tabela.index_of("ID_REGISTRO_FUNDO"),
+        "denom": tabela.index_of("DENOMINACAO_SOCIAL", "DENOM_SOCIAL"),
+        "tipo": tabela.index_of("TIPO_FUNDO", "TP_FUNDO"),
+        "sit": tabela.index_of("SITUACAO", "SIT"),
+        "admin": tabela.index_of("ADMINISTRADOR", "ADMIN"),
+        "gestor": tabela.index_of("GESTOR"),
+    }
+    registro: dict[str, dict] = {}
+    id_para_cnpj: dict[str, str] = {}
+    for linha in tabela.rows:
+        cnpj = norm_cnpj(cell(linha, idx["cnpj"]))
+        if not cnpj:
+            continue
+        anterior = registro.get(cnpj)
+        if anterior and esta_ativo(anterior.get("situacao")):
+            continue
+        registro[cnpj] = {
+            "denominacao": cell(linha, idx["denom"]),
+            "situacao": cell(linha, idx["sit"]),
+            "tipo": cell(linha, idx["tipo"]),
+            "publico_alvo": None,
+            "administrador": cell(linha, idx["admin"]),
+            "gestor": cell(linha, idx["gestor"]),
+            "classe": None,
+            "cnpjs_classes": [],
+        }
+        id_fundo = cell(linha, idx["id"])
+        if id_fundo:
+            id_para_cnpj[id_fundo] = cnpj
+
+    nome_classes = next(
+        (n for b, n in nomes.items() if b.startswith("registro_classe")), None
+    )
+    if nome_classes:
+        classes = CsvTable(archive.read(nome_classes), nome_classes)
+        idx_id = classes.index_of("ID_REGISTRO_FUNDO")
+        idx_publico = classes.index_of("PUBLICO_ALVO")
+        idx_cnpj_classe = classes.index_of("CNPJ_CLASSE")
+        if idx_id is not None:
+            for linha in classes.rows:
+                cnpj = id_para_cnpj.get(cell(linha, idx_id) or "")
+                if not cnpj:
+                    continue
+                info = registro[cnpj]
+                publico = cell(linha, idx_publico)
+                if publico and publico not in (info["publico_alvo"] or ""):
+                    info["publico_alvo"] = (
+                        f"{info['publico_alvo']} | {publico}" if info["publico_alvo"] else publico
+                    )
+                cnpj_classe = norm_cnpj(cell(linha, idx_cnpj_classe))
+                if cnpj_classe and cnpj_classe != cnpj:
+                    info["cnpjs_classes"].append(cnpj_classe)
+
+    log.info("registro de fundos: %s fundos", len(registro))
+    return registro
+
+
+def carregar_universo(fetch=fetch_bytes) -> tuple[dict[str, dict], bool]:
+    """Funde o Registro de Fundos (fonte atual) com o cad_fi (legado).
+
+    O registro vence quando o CNPJ está nos dois; o cad_fi permanece para o
+    histórico. Retorna (universo, registro_carregado) — sem o registro o
+    levantamento ainda roda, mas enxerga só o passado, e o diagnóstico avisa.
+    """
+    universo = carregar_cadastro(fetch)
+    for info in universo.values():
+        info["fonte"] = "cad_fi"
+    try:
+        registro = carregar_registro(fetch)
+    except Exception as exc:
+        log.warning("registro de fundos indisponível (%s); seguindo só com cad_fi", exc)
+        return universo, False
+    for cnpj, info in registro.items():
+        info["fonte"] = "registro"
+        universo[cnpj] = info
+    return universo, True
 
 TERMOS_CONSULTORIA = ("consultoria especializada", "consultor especializado", "taxa de consultoria")
 _TERMOS_MONO = ("monocedente", "mono cedente", "cedente unico", "unico cedente", "um unico cedente")
@@ -176,33 +287,33 @@ def extrair_consultoria(texto: str, texto_norm: str) -> dict:
     }
 
 
-def _diagnostico_zero(cadastro: dict, administrador: str, tipo: str, fetch) -> None:
-    """Quando o filtro zera, mostra ONDE a expectativa divergiu do arquivo real.
-
-    Saída pensada para a próxima iteração do código: distribuição real de
-    (TP_FUNDO, SIT) dos fundos do administrador, onde mais o termo aparece, e
-    o conteúdo dos datasets de registro pós-CVM 175 — que podem ser a fonte
-    correta quando o cad_fi não traz mais o que procuramos.
-    """
+def _diagnostico_zero(universo: dict, administrador: str, tipo: str, registro_ok: bool) -> None:
+    """Quando o filtro zera, mostra ONDE a expectativa divergiu do dado real."""
     from collections import Counter
 
     alvo = fold(administrador)
     print("=" * 78)
     print("DIAGNÓSTICO — por que nenhum fundo casou")
     print("=" * 78)
+    print(
+        "\n0) Registro de Fundos (CVM 175): "
+        + ("carregado e fundido ao cad_fi" if registro_ok
+           else "INDISPONÍVEL — enxergando só o cad_fi legado (fundos vivos ausentes)")
+    )
 
     por_admin = [
-        (cnpj, info) for cnpj, info in cadastro.items()
+        (cnpj, info) for cnpj, info in universo.items()
         if alvo in fold(info.get("administrador") or "")
     ]
     print(f"\n1) fundos cujo ADMIN contém {administrador!r}: {len(por_admin)}")
     if por_admin:
         combos = Counter(
-            (info.get("tipo"), info.get("situacao")) for _, info in por_admin
+            (info.get("fonte"), info.get("tipo"), info.get("situacao"))
+            for _, info in por_admin
         )
-        print("   distribuição (TP_FUNDO, SIT):")
-        for (tp, sit), n in combos.most_common(15):
-            print(f"     {n:5}  tipo={tp!r}  sit={sit!r}")
+        print("   distribuição (fonte, TIPO, SIT):")
+        for (fonte, tp, sit), n in combos.most_common(15):
+            print(f"     {n:5}  [{fonte}] tipo={tp!r}  sit={sit!r}")
         print("   exemplos:")
         for cnpj, info in por_admin[:5]:
             print(f"     {cnpj}  {(info.get('denominacao') or '')[:52]!r}")
@@ -210,7 +321,7 @@ def _diagnostico_zero(cadastro: dict, administrador: str, tipo: str, fetch) -> N
     else:
         aparicoes = [
             (cnpj, info, campo)
-            for cnpj, info in cadastro.items()
+            for cnpj, info in universo.items()
             for campo in ("gestor", "denominacao")
             if alvo in fold(info.get(campo) or "")
         ]
@@ -219,38 +330,12 @@ def _diagnostico_zero(cadastro: dict, administrador: str, tipo: str, fetch) -> N
             print(f"     {cnpj} [{campo}] {(info.get('denominacao') or '')[:46]!r}")
             print(f"        admin={info.get('administrador')!r} tipo={info.get('tipo')!r}")
 
-    tipos = Counter(info.get("tipo") for info in cadastro.values())
-    print("\n2) TP_FUNDO mais comuns no cad_fi de hoje (o filtro de tipo compara com isto):")
-    for tp, n in tipos.most_common(15):
-        print(f"     {n:6}  {tp!r}")
-
-    print("\n3) datasets de registro pós-CVM 175 (possível fonte correta dos FIDCs):")
-    for nome in ("registro_fundo.csv", "registro_classe.csv", "registro_subclasse.csv"):
-        _sondar_registro(nome, alvo, fetch)
-
-
-def _sondar_registro(nome: str, alvo: str, fetch) -> None:
-    """Baixa um dataset de registro e mostra colunas + linhas com o termo."""
-    url = f"{cvm_base()}/FI/CAD/DADOS/{nome}"
-    try:
-        tabela = CsvTable(fetch(url), nome)
-    except Exception as exc:
-        print(f"   {nome}: indisponível ({exc})")
-        return
-    print(f"\n   {nome}: {len(tabela.rows):,} linhas")
-    print(f"   colunas: {sorted(tabela.columns)}")
-    indice_por_coluna = sorted(tabela.columns.items(), key=lambda kv: kv[1])
-    com_termo = [
-        linha for linha in tabela.rows
-        if any(alvo in fold(celula) for celula in linha)
-    ]
-    print(f"   linhas contendo o termo: {len(com_termo)}")
-    for linha in com_termo[:3]:
-        print("   exemplo:")
-        for coluna, indice in indice_por_coluna:
-            valor = linha[indice] if indice < len(linha) else ""
-            if valor.strip():
-                print(f"     {coluna:34} = {valor[:58]}")
+    tipos = Counter(
+        (info.get("fonte"), info.get("tipo")) for info in universo.values()
+    )
+    print("\n2) tipos mais comuns no universo (o filtro de tipo compara com isto):")
+    for (fonte, tp), n in tipos.most_common(15):
+        print(f"     {n:6}  [{fonte}] {tp!r}")
 
 
 def cvm_base() -> str:
@@ -284,19 +369,19 @@ def levantar_taxas(
     print(f"LEVANTAMENTO — consultoria especializada | administrador contém: {administrador!r}")
     print(f"tipo de fundo: {tipo} | somente ativos: {apenas_ativos}\n")
 
-    cadastro = carregar_cadastro(fetch)
+    universo, registro_ok = carregar_universo(fetch)
     alvo_admin = fold(administrador)
     selecionados = {
         cnpj: info
-        for cnpj, info in cadastro.items()
+        for cnpj, info in universo.items()
         if alvo_admin in fold(info.get("administrador") or "")
         and _tipo_casa(tipo, info.get("tipo"))
         and (not apenas_ativos or esta_ativo(info.get("situacao")))
     }
-    print(f"fundos selecionados no cad_fi: {len(selecionados)}")
+    print(f"fundos selecionados (registro + cad_fi): {len(selecionados)}")
     if not selecionados:
         print("nenhum fundo casa com os filtros — diagnóstico abaixo\n")
-        _diagnostico_zero(cadastro, administrador, tipo, fetch)
+        _diagnostico_zero(universo, administrador, tipo, registro_ok)
         return 1
     if len(selecionados) > max_fundos:
         print(f"AVISO: limitando aos primeiros {max_fundos} (de {len(selecionados)})")
@@ -314,6 +399,7 @@ def levantar_taxas(
             linha = {
                 "cnpj": cnpj,
                 "denominacao": info.get("denominacao"),
+                "fonte_cadastro": info.get("fonte", ""),
                 "situacao": info.get("situacao"),
                 "publico_alvo": info.get("publico_alvo"),
                 "gestor": info.get("gestor"),
@@ -338,6 +424,18 @@ def levantar_taxas(
                     int(id_categoria) if id_categoria else None,
                     int(id_tipo) if id_tipo else None,
                 )
+                if doc is None:
+                    # pós-CVM 175 as classes têm CNPJ próprio, e há fundos cujo
+                    # regulamento está arquivado no FNET sob o CNPJ da classe
+                    for cnpj_classe in (info.get("cnpjs_classes") or [])[:2]:
+                        doc = _regulamento_vigente(
+                            client, cnpj_classe,
+                            int(id_categoria) if id_categoria else None,
+                            int(id_tipo) if id_tipo else None,
+                        )
+                        if doc is not None:
+                            linha["obs"] = f"regulamento sob o CNPJ da classe {cnpj_classe}"
+                            break
                 if doc is None:
                     linha["obs"] = "nenhum regulamento no FNET"
                     log.info("[%s/%s] %s — sem regulamento", n, len(selecionados), cnpj)

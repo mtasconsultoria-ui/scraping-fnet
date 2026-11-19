@@ -1,0 +1,50 @@
+# Levantamento de taxas de consultoria nos regulamentos dos fundos de um
+# administrador. Não usa banco, storage nem secrets — o resultado sai no log
+# (resumo) e num CSV publicado como artifact do run.
+#
+# Existe porque o ambiente de desenvolvimento não alcança CVM/B3: aqui há rede.
+name: Levantamento de taxas
+
+on:
+  workflow_dispatch:
+    inputs:
+      administrador:
+        description: "trecho do nome do administrador no cad_fi da CVM"
+        default: "LIMINE"
+      tipo_fundo:
+        description: "tipo de fundo (TP_FUNDO / filtro do FNET)"
+        default: "FIDC"
+      max_fundos:
+        description: "teto de fundos a examinar"
+        default: "400"
+
+permissions:
+  contents: read
+
+jobs:
+  levantar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+
+      - name: Levantamento
+        run: |
+          mkdir -p saida
+          python -m ingestor levantar-taxas \
+            --administrador "${{ inputs.administrador }}" \
+            --tipo "${{ inputs.tipo_fundo }}" \
+            --max-fundos "${{ inputs.max_fundos }}" \
+            --csv saida/levantamento.csv
+
+      - name: Publicar CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: levantamento-taxas
+          path: saida/levantamento.csv
+          if-no-files-found: ignore

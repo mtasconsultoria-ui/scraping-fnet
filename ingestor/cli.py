@@ -11,7 +11,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from . import busca as busca_mod
-from . import cvm_bulk, fnet_sync, prospeccao, smoke, text_extract
+from . import cvm_bulk, fnet_sync, levantamento, prospeccao, smoke, text_extract
 from .db import get_engine, init_db
 from .fnet_client import FnetClient
 from .http_client import fetch_bytes
@@ -116,6 +116,15 @@ def main(argv: list[str] | None = None) -> int:
         "--incluir-inativos", action="store_true", help="não exige situação ativa no cad_fi"
     )
 
+    p_taxas = sub.add_parser(
+        "levantar-taxas",
+        help="taxas de consultoria nos regulamentos dos fundos de um administrador (sem banco)",
+    )
+    p_taxas.add_argument("--administrador", required=True, help="trecho do nome no cad_fi (ex.: LIMINE)")
+    p_taxas.add_argument("--tipo", default="FIDC", help="tipo de fundo (TP_FUNDO do cad_fi e filtro FNET)")
+    p_taxas.add_argument("--max-fundos", type=int, default=400)
+    p_taxas.add_argument("--csv", help="caminho do CSV de saída")
+
     p_status = sub.add_parser("status", help="diagnóstico de saúde da ingestão")
     p_status.add_argument("--json", action="store_true", help="saída em JSON")
     p_status.add_argument(
@@ -138,6 +147,14 @@ def main(argv: list[str] | None = None) -> int:
             tipo_fundo=args.tipo_fundo,
             max_documentos=args.max_documentos,
             apenas_ativos=not args.incluir_inativos,
+        )
+    if args.comando == "levantar-taxas":
+        # somente fundos ativos: regulamento de fundo cancelado não interessa
+        return levantamento.levantar_taxas(
+            args.administrador,
+            tipo=args.tipo,
+            max_fundos=args.max_fundos,
+            saida_csv=args.csv,
         )
 
     engine = get_engine(args.database_url)

@@ -166,6 +166,28 @@ CNPJ (comum), a prospecção o extrai do texto do próprio documento.
 Ambos rodam também pelo workflow **Teste de fumaça** (`workflow_dispatch`), útil
 quando a máquina local não alcança os portais.
 
+### Levantamento de taxas por administrador
+
+```bash
+python -m ingestor levantar-taxas --administrador LIMINE --tipo FIDC \
+  --csv levantamento.csv
+```
+
+Seleciona no `cad_fi.csv` os fundos **ativos** do tipo e administrador pedidos,
+localiza no FNET o regulamento vigente de cada um e extrai:
+
+- **classificação de cedência** — primeiro pelo termo explícito do regulamento
+  ("monocedente"/"multicedente"); na ausência, pela **definição de Cedente(s)**
+  no glossário: cedente nominado com CNPJ indica estrutura monocedente,
+  definição genérica ("as pessoas jurídicas que venham a ceder...") indica
+  multicedente. A definição encontrada sai no CSV para conferência;
+- **cláusula de consultoria especializada** — percentuais ao ano e mínimos
+  mensais achados na vizinhança do termo, sempre com o trecho original.
+
+Os números são extração automática de texto livre: o CSV existe para triagem, e
+o trecho/documento é a fonte. Roda também pelo workflow **Levantamento de
+taxas** (`workflow_dispatch`), que publica o CSV como artifact do run.
+
 ## Agendamento e monitoramento (Fase 5)
 
 A ingestão roda no GitHub Actions (não na Vercel: funções serverless têm limite de
